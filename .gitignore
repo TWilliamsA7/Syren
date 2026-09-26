@@ -8,4 +8,12 @@ __pycache__/
 
 data/generated/
 data/archive/
+data/collection/
+data/learning/
+data/processed/
+data/simulation/
+data/events.json
+data/raw/
 node_modules
+
+tmp/
