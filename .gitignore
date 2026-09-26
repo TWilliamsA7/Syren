@@ -4,3 +4,9 @@
 # Pycache
 *.pyc
 __pycache__/
+
+# Downloaded ADS-B traces and generated datasets
+data/
+
+# Python Version
+.python-version

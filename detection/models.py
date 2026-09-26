@@ -6,10 +6,26 @@ import math
 import re
 from dataclasses import dataclass, field
 from collections.abc import Mapping
+from enum import Enum
 from typing import Any, Literal
 
 
 Severity = Literal["normal", "advisory", "warning", "critical"]
+
+
+class AnomalyType(str, Enum):
+    """Stable protocol vocabulary for anomaly types consumed by the UI/API."""
+
+    RAPID_DESCENT = "RAPID_DESCENT"
+    ACCELERATING_DESCENT = "ACCELERATING_DESCENT"
+    SPEED_ANOMALY = "SPEED_ANOMALY"
+    HEADING_ANOMALY = "HEADING_ANOMALY"
+    HEADING_OSCILLATION = "HEADING_OSCILLATION"
+    ALTITUDE_ANOMALY = "ALTITUDE_ANOMALY"
+    EMERGENCY_SQUAWK = "EMERGENCY_SQUAWK"
+    TELEMETRY_GAP = "TELEMETRY_GAP"
+    TELEMETRY_INCONSISTENCY = "TELEMETRY_INCONSISTENCY"
+    AIRCRAFT_CONFLICT = "AIRCRAFT_CONFLICT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +82,22 @@ class FlightState:
 
 @dataclass(frozen=True, slots=True)
 class Anomaly:
-    type: str
+    type: AnomalyType
     severity: float
     message: str
+
+    def __post_init__(self) -> None:
+        try:
+            anomaly_type = AnomalyType(self.type)
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"unsupported anomaly type: {self.type}") from error
+        object.__setattr__(self, "type", anomaly_type)
+        if isinstance(self.severity, bool) or not isinstance(self.severity, (int, float)):
+            raise ValueError("anomaly severity must be numeric")
+        if not math.isfinite(self.severity) or not 0.0 <= self.severity <= 1.0:
+            raise ValueError("anomaly severity must be finite and in [0, 1]")
+        if not isinstance(self.message, str) or not self.message.strip():
+            raise ValueError("anomaly message must be a non-empty string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +109,22 @@ class DetectionResult:
     severity: Severity
     anomalies: tuple[Anomaly, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.icao24, str) or not self.icao24.strip():
+            raise ValueError("result icao24 must be a non-empty string")
+        if not isinstance(self.flight_id, str) or not self.flight_id.strip():
+            raise ValueError("result flight_id must be a non-empty string")
+        if isinstance(self.timestamp, bool) or not isinstance(self.timestamp, (int, float)) or not math.isfinite(self.timestamp):
+            raise ValueError("result timestamp must be finite Unix seconds")
+        if isinstance(self.risk_score, bool) or not isinstance(self.risk_score, (int, float)):
+            raise ValueError("risk_score must be numeric")
+        if not math.isfinite(self.risk_score) or not 0.0 <= self.risk_score <= 1.0:
+            raise ValueError("risk_score must be finite and in [0, 1]")
+        if self.severity != severity_for_risk(float(self.risk_score)):
+            raise ValueError("result severity does not match the protocol risk thresholds")
+        if not isinstance(self.anomalies, tuple) or not all(isinstance(item, Anomaly) for item in self.anomalies):
+            raise ValueError("anomalies must be a tuple of Anomaly records")
+
     def to_mapping(self) -> dict[str, object]:
         """Convert to the protocol's JSON-compatible DetectionResult shape."""
         return {
@@ -89,7 +134,7 @@ class DetectionResult:
             "risk_score": self.risk_score,
             "severity": self.severity,
             "anomalies": [
-                {"type": anomaly.type, "severity": anomaly.severity, "message": anomaly.message}
+                {"type": anomaly.type.value, "severity": anomaly.severity, "message": anomaly.message}
                 for anomaly in self.anomalies
             ],
         }
