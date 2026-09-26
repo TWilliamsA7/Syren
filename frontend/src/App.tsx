@@ -34,6 +34,14 @@ interface Aircraft {
   dst?: number;
   dir?: number;
   timestamp?: string;
+  detection?: {
+    icao24: string;
+    flight_id: string;
+    timestamp: number;
+    risk_score: number;
+    severity: 'normal' | 'advisory' | 'warning' | 'critical';
+    anomalies: { type: string; severity: number; message: string }[];
+  };
 }
 
 const DEFAULT_VIEW_STATE = {
@@ -55,9 +63,10 @@ const REGION_VIEWS = {
   US_EAST: { longitude: -75.1652, latitude: 39.9526, zoom: 5, pitch: 0, bearing: 0 }
 };
 
-// Inline SVG Atlas for the plane icon with black outline/stroke
-const AIRPLANE_ICON = 'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="%2336F6B4" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';const ICON_MAPPING = {
-  marker: { x: 0, y: 0, width: 128, height: 128, mask: false }
+// A white mask lets IconLayer apply each aircraft's data-driven alert color.
+const AIRPLANE_ICON = 'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="white"><path d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';
+const ICON_MAPPING = {
+  marker: { x: 0, y: 0, width: 128, height: 128, mask: true }
 };
 
 function App() {
@@ -101,7 +110,7 @@ function App() {
 
     const fetchData = async () => {
       try {
-        const response = await fetch('/data.jsonl', { cache: 'no-store' });
+        const response = await fetch('/api/aircraft', { cache: 'no-store' });
         if (!response.ok) throw new Error('Failed to fetch data file');
         
         const rawText = await response.text();
@@ -122,6 +131,7 @@ function App() {
           baro_rate: item.kinematics?.vertical_rate_baro_fpm,
           squawk: item.status?.squawk,
           emergency: item.status?.emergency,
+          detection: item.detection,
           category: item.aircraft?.category,
           timestamp: item.timestamp ? new Date(item.timestamp * 1000).toISOString() : new Date().toISOString()
         }));
@@ -228,7 +238,10 @@ function App() {
     }
   };
 
-  const hasFeedAnomaly = aircraftList.some(a => a.emergency && a.emergency !== 'none');
+  const hasDetectionAnomaly = (aircraft: Aircraft) => (aircraft.detection?.anomalies.length ?? 0) > 0;
+  const hasAircraftAlert = (aircraft: Aircraft) =>
+    (aircraft.emergency && aircraft.emergency !== 'none') || hasDetectionAnomaly(aircraft);
+  const hasFeedAnomaly = aircraftList.some(hasAircraftAlert);
 
   // Define Deck.GL Layers for Aircraft visualization mapped to geo coordinates
   const layers = [
@@ -248,14 +261,14 @@ function App() {
         const rawHeading = d.true_heading ?? d.nav_heading ?? d.heading ?? d.track ?? 0;
         return -rawHeading; 
       },
-      getColor: (d: Aircraft) => 
-        (d.emergency && d.emergency !== 'none') ? [244, 63, 94] : [54, 246, 180],
+      getColor: (d: Aircraft) => hasAircraftAlert(d) ? [244, 63, 94] : [54, 246, 180],
       pickable: true,
       onHover: info => setHoveredAircraft(info.object as Aircraft || null),
       updateTriggers: {
         data: [aircraftList, searchedAircraft, viewMode],
         // Added updateTriggers so it recalculates angles smoothly if data updates
-        getAngle: [aircraftList, searchedAircraft, viewMode] 
+        getAngle: [aircraftList, searchedAircraft, viewMode],
+        getColor: [aircraftList, searchedAircraft, viewMode]
       }
     })
   ];
@@ -319,7 +332,7 @@ function App() {
             onViewStateChange={(e: any) => setViewState(e.viewState)}
             controller={true}
             layers={layers}
-            style={{ position: 'absolute', inset: 0, zIndex: 2 }}
+            style={{ position: 'absolute', top: '0', right: '0', bottom: '0', left: '0', zIndex: '2' }}
           >
             <Map
               reuseMaps
@@ -433,7 +446,7 @@ function App() {
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Overall Feed Anomaly Status</div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.125rem', fontWeight: '700', color: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}>
                   <span style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}></span>
-                  {hasFeedAnomaly ? 'ALERT: Emergency Squawk Detected' : 'All US Telemetry Nominal'}
+                  {hasFeedAnomaly ? 'ALERT: Aircraft Anomaly Detected' : 'All US Telemetry Nominal'}
                 </div>
                 <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0.5rem 0 0 0' }}>
                   Continuous boundary evaluations running on local Jetson node.
@@ -465,7 +478,7 @@ function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, overflowY: 'auto' }}>
               <div style={{ 
                 backgroundColor: 'var(--bg-sidebar)', 
-                border: `1px solid ${searchedAircraft.emergency !== 'none' ? 'var(--red)' : 'var(--accent)'}`, 
+                border: `1px solid ${hasAircraftAlert(searchedAircraft) ? 'var(--red)' : 'var(--accent)'}`,
                 borderRadius: '0.5rem', 
                 padding: '1.25rem' 
               }}>
@@ -475,15 +488,19 @@ function App() {
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>ICAO Hex: <strong>{searchedAircraft.hex}</strong> | Reg: <strong>{searchedAircraft.r || 'N/A'}</strong></span>
                   </div>
                   <span style={{ 
-                    backgroundColor: searchedAircraft.emergency !== 'none' ? 'var(--red)' : 'var(--green)', 
-                    color: searchedAircraft.emergency !== 'none' ? 'var(--text-main)' : '#0F172A', 
+                    backgroundColor: hasAircraftAlert(searchedAircraft) ? 'var(--red)' : 'var(--green)',
+                    color: hasAircraftAlert(searchedAircraft) ? 'var(--text-main)' : '#0F172A',
                     fontSize: '0.625rem', 
                     fontWeight: '700', 
                     padding: '0.25rem 0.625rem', 
                     borderRadius: '9999px',
                     textTransform: 'uppercase'
                   }}>
-                    {searchedAircraft.emergency !== 'none' ? `Emergency: ${searchedAircraft.emergency}` : 'Nominal'}
+                    {hasDetectionAnomaly(searchedAircraft)
+                      ? `ANOMALY: ${searchedAircraft.detection?.anomalies.map(anomaly => anomaly.type).join(', ')}`
+                      : searchedAircraft.emergency && searchedAircraft.emergency !== 'none'
+                        ? `Emergency: ${searchedAircraft.emergency}`
+                        : 'Nominal'}
                   </span>
                 </div>
 

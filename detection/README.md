@@ -28,6 +28,20 @@ Replay one protocol `FlightState` JSON object per line and emit one result JSON 
 python -m detection.harness --input-jsonl path/to/flight_states.jsonl
 ```
 
+Create an aircraft feed for the frontend by attaching each result to its
+original `FlightState`. Keep the input chronological per aircraft, and choose
+`frontend/public/data.jsonl` as the output path when using the frontend's default
+feed URL:
+
+```sh
+python -m detection.enrich_jsonl path/to/flight_states.jsonl frontend/public/data.jsonl
+```
+
+The resulting JSONL retains all flight-state fields and adds a `detection`
+object containing `risk_score`, `severity`, and `anomalies`. Any non-empty
+`detection.anomalies` list colors the aircraft red in the map. Emergency
+transponder states remain red as well.
+
 For plane-to-plane interaction checks, provide one JSON array of synchronized states per line:
 
 ```sh
