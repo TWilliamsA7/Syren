@@ -302,8 +302,11 @@ python -m ml.replay_aircraft_warnings
 
 It writes evaluated per-aircraft results and a report under
 `data/learning/ten_day_development/aircraft_warning_replay/`. On 2025-11-15,
-speed loss warned 7 of 27 declaration events, altitude reversal warned 4,
-and their OR warned 9, with 249 seconds median lead. The OR generated 546
+speed loss warned 15 of 27 declaration events, altitude reversal warned 5,
+and their OR warned 17 with a median first-warning lead of 528 seconds. The
+OR's 17 events comprise 5 warned 10–20 minutes early, 9 warned in the
+original 2–10 minute band, and 3 warned under 2 minutes before declaration.
+The OR generated 546
 control alerts over 24 clock hours and peaked at 51 in any rolling hour of
 the sampled replay fleet, below the exploratory limit of 60. The same raw
 trace and result interface is used for each rule and their OR. This is a

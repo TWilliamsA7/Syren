@@ -48,3 +48,9 @@ The frozen research thresholds are speed loss of at least
 least 100 feet over five minutes. Both require airborne state and at least
 half the respective measurements present. Predictions use only prior and
 current kinematics; squawk and emergency status are ignored.
+
+The research replay counts a declaration as preceded by a warning when an
+unsuppressed alert occurs within the prior 20 minutes. It separately reports
+alerts more than 10 minutes early, 2–10 minutes early, and under 2 minutes
+early. The predictor itself does not receive declaration labels or compute
+lead time.

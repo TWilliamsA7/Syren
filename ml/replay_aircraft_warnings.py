@@ -19,6 +19,7 @@ from scripts.fetch_event_traces import load_raw_trace, trace_points
 REPLAY_DATE = "2025-11-15"
 OUTPUT = ROOT / "data/learning/ten_day_development/aircraft_warning_replay"
 MODES: tuple[Mode, ...] = ("speed_loss", "altitude_reversal", "combined")
+MAX_PREDECLARATION_LEAD_SECONDS = 1200.0
 
 
 def trace_state(point: dict[str, Any]) -> FlightState:
@@ -74,25 +75,46 @@ def rolling_hour_peak(timestamps: list[float]) -> int:
 def summarize_mode(
     alerts: list[dict[str, Any]], events: dict[str, dict[str, Any]], control_hours: float,
 ) -> dict[str, Any]:
-    detected: dict[str, dict[str, Any]] = {}
+    event_hits: dict[str, list[tuple[float, dict[str, Any]]]] = defaultdict(list)
+    events_by_aircraft: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in events.values():
+        events_by_aircraft[event["icao24"]].append(event)
     control_alerts = []
     candidate_unmatched = 0
     for alert in alerts:
         if alert["source_cohort"] == "control_sample":
             control_alerts.append(alert)
             continue
-        linked = [event for event in events.values()
-                  if event["icao24"] == alert["icao24"]
-                  and 120 < event["event_unix_s"] - alert["timestamp"] <= 600]
+        linked = [event for event in events_by_aircraft[alert["icao24"]]
+                  if 0 < event["event_unix_s"] - alert["timestamp"] <= MAX_PREDECLARATION_LEAD_SECONDS]
         if not linked:
             candidate_unmatched += 1
         for event in linked:
             lead = event["event_unix_s"] - alert["timestamp"]
-            if event["event_id"] not in detected or lead > detected[event["event_id"]]["warning_seconds"]:
-                detected[event["event_id"]] = {
-                    **event, "warning_seconds": lead, "alert_timestamp": alert["timestamp"],
-                    "signals": alert["signals"],
-                }
+            event_hits[event["event_id"]].append((lead, alert))
+    detected = {}
+    band_counts = {"early_10_to_20_minutes_only": 0, "target_2_to_10_minutes": 0,
+                   "late_under_2_minutes_only": 0}
+    target_leads = []
+    for event_id, hits in event_hits.items():
+        early = [item for item in hits if item[0] > 600]
+        target = [item for item in hits if 120 < item[0] <= 600]
+        late = [item for item in hits if item[0] <= 120]
+        if target:
+            band = "target_2_to_10_minutes"
+            target_leads.append(max(item[0] for item in target))
+        elif early:
+            band = "early_10_to_20_minutes_only"
+        else:
+            band = "late_under_2_minutes_only"
+        band_counts[band] += 1
+        first_lead, first_alert = max(hits, key=lambda item: item[0])
+        detected[event_id] = {
+            **events[event_id], "warning_seconds": first_lead,
+            "alert_timestamp": first_alert["timestamp"], "signals": first_alert["signals"],
+            "warning_band": band,
+            "all_predeclaration_warning_seconds": sorted((lead for lead, _ in hits), reverse=True),
+        }
     warnings = [event["warning_seconds"] for event in detected.values()]
     timestamps = [alert["timestamp"] for alert in control_alerts]
     return {
@@ -100,12 +122,15 @@ def summarize_mode(
         "detected_aircraft": len({event["icao24"] for event in detected.values()}),
         "event_recall": len(detected) / len(events) if events else None,
         "median_warning_seconds": statistics.median(warnings) if warnings else None,
+        "warning_band_counts": band_counts,
+        "strict_2_to_10_minute_events": band_counts["target_2_to_10_minutes"],
+        "strict_2_to_10_minute_median_warning_seconds": statistics.median(target_leads) if target_leads else None,
         "control_observed_airborne_hours": control_hours,
         "control_false_alerts": len(control_alerts),
         "control_false_alerts_per_1000_flight_hours": len(control_alerts) * 1000 / control_hours if control_hours else None,
         "control_false_alerts_per_24_clock_hours": len(control_alerts) / 24,
         "control_false_alerts_peak_rolling_hour": rolling_hour_peak(timestamps),
-        "candidate_alerts_outside_target_window": candidate_unmatched,
+        "candidate_alerts_outside_20_minute_predeclaration_window": candidate_unmatched,
         "matched_events": sorted(detected.values(), key=lambda event: event["event_id"]),
         "missed_events": sorted((event for event_id, event in events.items() if event_id not in detected),
                                 key=lambda event: event["event_id"]),
@@ -160,8 +185,12 @@ def run_replay(
     summaries = {mode: summarize_mode(alerts[mode], events, control_hours) for mode in MODES}
     combined = summaries["combined"]
     report = {
-        "schema_version": 1, "date_utc": date,
-        "target": "observed ADS-B declaration 2–10 minutes after a warning",
+        "schema_version": 2, "date_utc": date,
+        "target": "any warning in the 20 minutes before an observed ADS-B declaration",
+        "warning_timing_policy": (
+            "Count a warning at any positive lead up to 20 minutes; report >10 minutes, "
+            "2–10 minutes, and <2 minutes separately. Alerts farther away are not attributed "
+            "to the declaration. This is an exploratory association, not confirmed causation."),
         "input": "one protocol FlightState per observation per aircraft",
         "output": "one PredictionResult per update; evaluated results saved to prediction JSONL",
         "modes": summaries,

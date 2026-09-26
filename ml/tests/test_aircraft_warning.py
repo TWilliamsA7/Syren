@@ -6,6 +6,7 @@ import unittest
 
 from detection.models import FlightState, Kinematics, Position, Status
 from ml.aircraft_warning import AircraftWarningEngine
+from ml.replay_aircraft_warnings import summarize_mode
 
 
 def state(icao: str, time: float, speed: float, altitude: float = 10000.0,
@@ -77,6 +78,26 @@ class AircraftWarningTests(unittest.TestCase):
         self.assertEqual(result.to_mapping()["status"], "collecting_history")
         self.assertFalse(result.alert)
         self.assertEqual(engine.update(state("aaaaaa", 330, 95)).status, "collecting_history")
+
+    def test_replay_counts_early_target_and_late_predeclaration_warnings(self) -> None:
+        events = {name: {"event_id": name, "icao24": name, "event_unix_s": 2000.0,
+                         "signal_subtypes": ["emergency_squawk:7700"]}
+                  for name in ("early", "target", "late")}
+        alerts = [
+            {"icao24": "early", "timestamp": 1100.0, "source_cohort": "candidate", "signals": []},
+            {"icao24": "target", "timestamp": 1700.0, "source_cohort": "candidate", "signals": []},
+            {"icao24": "late", "timestamp": 1970.0, "source_cohort": "candidate", "signals": []},
+            {"icao24": "late", "timestamp": 2001.0, "source_cohort": "candidate", "signals": []},
+        ]
+        report = summarize_mode(alerts, events, 1.0)
+        self.assertEqual(report["detected_events"], 3)
+        self.assertEqual(report["strict_2_to_10_minute_events"], 1)
+        self.assertEqual(report["warning_band_counts"], {
+            "early_10_to_20_minutes_only": 1,
+            "target_2_to_10_minutes": 1,
+            "late_under_2_minutes_only": 1,
+        })
+        self.assertEqual(report["candidate_alerts_outside_20_minute_predeclaration_window"], 1)
 
 
 if __name__ == "__main__":
