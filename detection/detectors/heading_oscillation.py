@@ -37,6 +37,12 @@ class HeadingOscillationDetector(RuleDetector):
             f"Repeated course reversals: {turns} direction changes in a {span:.0f}-degree span",
         )
 
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._history.clear()
+        else:
+            self._history.discard(icao24)
+
     @staticmethod
     def _unwrap(tracks: list[float]) -> list[float]:
         if not tracks:

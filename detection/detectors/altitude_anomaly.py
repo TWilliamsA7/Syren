@@ -16,6 +16,8 @@ class AltitudeAnomalyDetector(RuleDetector):
 
     def update(self, state: FlightState) -> Anomaly | None:
         altitude = state.position.altitude_baro_ft
+        if altitude is None:
+            altitude = state.position.altitude_geom_ft
         if altitude is None or state.position.on_ground is True or state.position.stale is True:
             return None
         self._history.append(state.icao24, state.timestamp, altitude)
@@ -28,3 +30,9 @@ class AltitudeAnomalyDetector(RuleDetector):
         excess = turns - self.warning_reversals
         confidence = bounded_severity(0.65 + 0.08 * excess + 0.1 * min(1.0, span / (2 * self.minimum_range_ft)))
         return Anomaly("ALTITUDE_ANOMALY", confidence, f"Altitude oscillation: {turns} trend reversals across {span:.0f} ft")
+
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._history.clear()
+        else:
+            self._history.discard(icao24)

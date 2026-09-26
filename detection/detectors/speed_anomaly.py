@@ -28,3 +28,9 @@ class SpeedAnomalyDetector(RuleDetector):
         confidence = 0.60 + 0.39 * (drop - self.warning_drop_kts) / (self.critical_drop_kts - self.warning_drop_kts)
         label = "critical" if drop >= self.critical_drop_kts else "warning"
         return Anomaly("SPEED_ANOMALY", bounded_severity(confidence), f"{label.title()} ground-speed decay {drop:.0f} kt over {samples[-1].timestamp - samples[0].timestamp:.0f} s")
+
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._history.clear()
+        else:
+            self._history.discard(icao24)

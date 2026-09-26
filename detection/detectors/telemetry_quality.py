@@ -27,3 +27,9 @@ class TelemetryQualityDetector(RuleDetector):
             severity,
             f"Position telemetry stale in {stale_count} of {len(samples)} recent samples",
         )
+
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._history.clear()
+        else:
+            self._history.discard(icao24)

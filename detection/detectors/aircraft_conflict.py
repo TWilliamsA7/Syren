@@ -39,12 +39,16 @@ class AircraftConflictDetector:
                 if closest is None:
                     continue
                 time_s, horizontal_nm, vertical_ft = closest
-                if horizontal_nm > self.horizontal_threshold_nm or vertical_ft > self.vertical_threshold_ft:
+                accuracy_nm = sum(
+                    (state.position.accuracy_m or 0.0) / 1852.0 for state in (first, second)
+                )
+                horizontal_limit_nm = self.horizontal_threshold_nm + accuracy_nm
+                if horizontal_nm > horizontal_limit_nm or vertical_ft > self.vertical_threshold_ft:
                     continue
                 severity = min(
                     0.99,
                     0.70
-                    + 0.15 * (1.0 - horizontal_nm / self.horizontal_threshold_nm)
+                    + 0.15 * (1.0 - horizontal_nm / horizontal_limit_nm)
                     + 0.14 * (1.0 - vertical_ft / self.vertical_threshold_ft),
                 )
                 message = (
@@ -95,19 +99,31 @@ class AircraftConflictDetector:
             return None
 
         latitude_mid = (first.position.latitude + second.position.latitude) / 2.0
-        dx_nm = (second.position.longitude - first.position.longitude) * 60.0 * cos(radians(latitude_mid))
-        dy_nm = (second.position.latitude - first.position.latitude) * 60.0
         first_track = radians(first.kinematics.track_deg)
         second_track = radians(second.kinematics.track_deg)
         first_speed = first.kinematics.ground_speed_kts / 3600.0
         second_speed = second.kinematics.ground_speed_kts / 3600.0
-        dvx_nm_s = second_speed * sin(second_track) - first_speed * sin(first_track)
-        dvy_nm_s = second_speed * cos(second_track) - first_speed * cos(first_track)
+        first_vx = first_speed * sin(first_track)
+        second_vx = second_speed * sin(second_track)
+        first_vy = first_speed * cos(first_track)
+        second_vy = second_speed * cos(second_track)
+        reference_time = max(first.timestamp, second.timestamp)
+        first_age = reference_time - first.timestamp
+        second_age = reference_time - second.timestamp
+        dx_nm = (second.position.longitude - first.position.longitude) * 60.0 * cos(radians(latitude_mid))
+        dy_nm = (second.position.latitude - first.position.latitude) * 60.0
+        # Align asynchronous reports to the newer report timestamp before projecting forward.
+        dx_nm += second_vx * second_age - first_vx * first_age
+        dy_nm += second_vy * second_age - first_vy * first_age
+        dvx_nm_s = second_vx - first_vx
+        dvy_nm_s = second_vy - first_vy
 
         # Missing vertical rate means the projection holds current altitude constant;
         # it is a forecast assumption, not a synthesized telemetry value.
-        dvz_ft_s = ((second_rate or 0.0) - (first_rate or 0.0)) / 60.0
-        initial_dz_ft = second_alt - first_alt
+        first_vz = (first_rate or 0.0) / 60.0
+        second_vz = (second_rate or 0.0) / 60.0
+        dvz_ft_s = second_vz - first_vz
+        initial_dz_ft = second_alt + second_vz * second_age - first_alt - first_vz * first_age
         best: tuple[float, float, float] | None = None
         steps = max(1, int(self.lookahead_seconds / self.step_seconds))
         for index in range(steps + 1):

@@ -12,21 +12,26 @@ class AcceleratingDescentDetector(RuleDetector):
             raise ValueError("window and acceleration threshold must be positive")
         self.window_seconds = window_seconds
         self.minimum_acceleration = minimum_acceleration_fpm_per_min
-        self._history: FlightHistory[float] = FlightHistory(window_seconds)
+        self._history: FlightHistory[tuple[float, str]] = FlightHistory(window_seconds)
 
     def update(self, state: FlightState) -> Anomaly | None:
         if state.position.on_ground is True or state.position.stale is True:
             return None
         rate = state.kinematics.vertical_rate_baro_fpm
+        source = "baro"
         if rate is None:
             rate = state.kinematics.vertical_rate_geom_fpm
+            source = "geom"
         if rate is None:
             return None
-        self._history.append(state.icao24, state.timestamp, rate)
         samples = self._history.get(state.icao24)
-        if len(samples) < 3 or samples[-1].value >= 0:
+        if samples and samples[-1].value[1] != source:
+            self._history.discard(state.icao24)
+        self._history.append(state.icao24, state.timestamp, (rate, source))
+        samples = self._history.get(state.icao24)
+        if len(samples) < 3 or samples[-1].value[0] >= 0:
             return None
-        slope_per_second = linear_slope([(sample.timestamp, sample.value) for sample in samples])
+        slope_per_second = linear_slope([(sample.timestamp, sample.value[0]) for sample in samples])
         if slope_per_second is None:
             return None
         acceleration = -slope_per_second * 60.0
@@ -38,3 +43,9 @@ class AcceleratingDescentDetector(RuleDetector):
             severity,
             f"Descent rate is worsening by about {acceleration:.0f} fpm per minute",
         )
+
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._history.clear()
+        else:
+            self._history.discard(icao24)

@@ -36,3 +36,9 @@ class HeadingAnomalyDetector(RuleDetector):
         confidence = 0.60 + 0.39 * (change - self.warning_change_deg) / (self.critical_change_deg - self.warning_change_deg)
         label = "critical" if change >= self.critical_change_deg else "warning"
         return Anomaly("HEADING_ANOMALY", bounded_severity(confidence), f"{label.title()} track change {change:.0f} degrees")
+
+    def reset(self, icao24: str | None = None) -> None:
+        if icao24 is None:
+            self._previous.clear()
+        else:
+            self._previous.pop(icao24, None)
