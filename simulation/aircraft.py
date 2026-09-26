@@ -6,6 +6,16 @@ from shared.flight_state import (
 )
 
 NM_PER_DEG_LAT = 60.0
+ACCEL_KTS_PER_S = 1.5
+TURN_RATE_DEG_PER_S = 3.0
+VS_CHANGE_FPM_PER_S = 200.0
+ALT_CAPTURE_FPM_PER_FT = 4.0
+
+def _approach(current, target, max_change):
+    if target > current:
+        return min(current + max_change, target)
+    return max(current - max_change, target)
+
 
 @dataclass
 class SimAircraft:
@@ -24,8 +34,41 @@ class SimAircraft:
     squawk: str = "1200"
     emergency: str = "none"
     on_ground: bool = False
+    target_speed_kts: float | None = None
+    target_track_deg: float | None = None
+    target_vertical_rate_fpm: float | None = None
+    climb_rate_fpm: float = 2000.0
+    descent_rate_fpm: float = 2000.0
+
+
+    def _desired_vertical_rate(self):
+        if self.target_vertical_rate_fpm is not None:
+            return self.target_vertical_rate_fpm
+        if self.selected_altitude_ft is None:
+            return None
+        error_ft = self.selected_altitude_ft - self.altitude_ft
+        desired = error_ft * ALT_CAPTURE_FPM_PER_FT
+        return max(-self.descent_rate_fpm, min(self.climb_rate_fpm, desired))
+
+    def _update_controls(self, dt):
+        if self.target_speed_kts is not None:
+            self.speed_kts = _approach(
+                self.speed_kts, self.target_speed_kts, ACCEL_KTS_PER_S * dt)
+
+        if self.target_track_deg is not None:
+            turn = (self.target_track_deg - self.track_deg + 180) % 360 - 180
+            max_turn = TURN_RATE_DEG_PER_S * dt
+            turn = max(-max_turn, min(max_turn, turn))
+            self.track_deg = (self.track_deg + turn) % 360
+
+        desired_vs = self._desired_vertical_rate()
+        if desired_vs is not None:
+            self.vertical_rate_fpm = _approach(
+                self.vertical_rate_fpm, desired_vs, VS_CHANGE_FPM_PER_S * dt)
+
 
     def step(self, dt):
+        self._update_controls(dt)
         distance_nm = self.speed_kts * dt / 3600
         track_rad = math.radians(self.track_deg)
         north_nm = distance_nm * math.cos(track_rad)
