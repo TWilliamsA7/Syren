@@ -283,3 +283,29 @@ in 177.0 hours (729 per 1,000 hours); the context-matched patterns caught fewer
 events at similar rates. This follow-up remains research-only. The weak
 controls and repeated development-date analysis still prevent future-date
 performance claims.
+
+# Per-aircraft warning pipeline
+
+`ml.aircraft_warning.AircraftWarningEngine` accepts a protocol `FlightState`
+for one aircraft at a time and returns a separate JSON-ready
+`PredictionResult`. It keeps five minutes of causal history, evaluates at most
+once per minute, and suppresses repeated alerts for ten minutes per aircraft.
+The result includes measured speed-loss and altitude-reversal signals; it does
+not call them emergency probabilities. See
+`shared/prediction_result_schema.md` for the exact input/output contract.
+
+Run the raw-trace, single-date development replay with:
+
+```powershell
+python -m ml.replay_aircraft_warnings
+```
+
+It writes evaluated per-aircraft results and a report under
+`data/learning/ten_day_development/aircraft_warning_replay/`. On 2025-11-15,
+speed loss warned 7 of 27 declaration events, altitude reversal warned 4,
+and their OR warned 9, with 249 seconds median lead. The OR generated 546
+control alerts over 24 clock hours and peaked at 51 in any rolling hour of
+the sampled replay fleet, below the exploratory limit of 60. The same raw
+trace and result interface is used for each rule and their OR. This is a
+development replay, not a future-date or broad-fleet performance claim; the
+predictor is separate from the live detection engine.
