@@ -234,6 +234,22 @@ function App() {
         <div className="map-placeholder">
           <div className="map-grid-bg" />
 
+          {/* Earth Image Background Placeholder */}
+          <img 
+            src="/earth.jpg" 
+            alt="Earth Globe" 
+            style={{ 
+              position: 'absolute', 
+              inset: 0, 
+              width: '100%', 
+              height: '100%', 
+              objectFit: 'fill', 
+              opacity: 1.0, 
+              zIndex: 0,
+              filter: 'contrast(1.2) brightness(0.8)' 
+            }} 
+          />
+
           {/* Region Zoom Toolbar */}
           <div className="map-toolbar">
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '0.25rem' }}>Region Zoom:</span>
