@@ -119,7 +119,7 @@ def _lines_in_area(path, start_s, end_s, lat, lon, radius_nm):
 # into out_path, sorted by time. The day must be on disk. Returns (states, aircraft) counts.
 # Reads all ~80k trace files of the day, spread over every CPU core.
 def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENTER[1],
-               radius_nm=RADIUS_NM, root=ARCHIVE_DIR):
+               radius_nm=RADIUS_NM, root=ARCHIVE_DIR, on_progress=None):
     folder = day_dir(date, root)
     if folder is None:
         raise LookupError(f"{date} is not on disk, get it with: python3 -m data.history swap {date}")
@@ -133,10 +133,14 @@ def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENT
 
     files = glob.glob(os.path.join(folder, "traces", "*", "trace_full_*.json"))
     rows, dropped = [], 0
+    if on_progress is not None:
+        on_progress(0, len(files))
     with concurrent.futures.ProcessPoolExecutor() as pool:
-        for kept, bad in pool.map(in_area, files, chunksize=200):
+        for completed, (kept, bad) in enumerate(pool.map(in_area, files, chunksize=200), start=1):
             rows.extend(kept)
             dropped += bad
+            if on_progress is not None:
+                on_progress(completed, len(files))
     rows.sort(key=lambda row: row[0])
 
     folder, name = os.path.split(out_path)

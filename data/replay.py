@@ -68,11 +68,25 @@ class Player:
 
 
 # Replace out_path in one step, so the frontend never reads a half-written file.
+# On Windows a reader can briefly hold the destination without delete sharing.
+# Retry that transient lock; if it persists for this tick, keep the last good
+# snapshot and let the playback loop try again on its next update.
 def write_snapshot(lines, out_path):
     temporary = out_path + ".tmp"
     with open(temporary, "w") as out:
         out.writelines(lines)
-    os.replace(temporary, out_path)
+    for attempt in range(5):
+        try:
+            os.replace(temporary, out_path)
+            return True
+        except PermissionError:
+            if attempt == 4:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+                return False
+            time.sleep(0.05 * (2 ** attempt))
 
 
 # Update the status, unless a newer start or stop has replaced this thread. Returns False then.

@@ -44,6 +44,10 @@ interface Aircraft {
   };
 }
 
+const hasAircraftAlert = (aircraft: Aircraft) =>
+  Boolean(aircraft.emergency && aircraft.emergency !== "none") ||
+  (aircraft.detection?.anomalies?.length ?? 0) > 0;
+
 const DEFAULT_VIEW_STATE = {
   longitude: -95.7129,
   latitude: 37.0902,
@@ -93,11 +97,12 @@ const REGION_VIEWS = {
   },
 };
 
-// Inline SVG Atlas for the plane icon with black outline/stroke
+// Keep the outlined icon style and provide separate green/red atlas cells.
 const AIRPLANE_ICON =
-  'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="%2336F6B4" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';
+  'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128" viewBox="0 0 48 24"><path fill="%2336F6B4" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/><path transform="translate(24 0)" fill="%23F43F5E" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';
 const ICON_MAPPING = {
   marker: { x: 0, y: 0, width: 128, height: 128, mask: false },
+  alert: { x: 128, y: 0, width: 128, height: 128, mask: false },
 };
 
 type Region = "US_ALL" | "US_WEST" | "US_MIDWEST" | "US_SOUTH" | "US_EAST";
@@ -160,6 +165,7 @@ function App() {
   const [hoveredAircraft, setHoveredAircraft] = useState<Aircraft | null>(null);
 
   const consecutiveFailuresRef = useRef<number>(0);
+  const activeAlertIdsRef = useRef<Set<string>>(new Set());
 
   // Helper function to safely parse either JSON array or NDJSON (JSON Lines)
   const parseJsonData = (text: string) => {
@@ -380,6 +386,29 @@ function App() {
   const emergencyCount = aircraftList.filter(
     (a) => a.emergency && a.emergency !== "none",
   ).length;
+  useEffect(() => {
+    if (viewMode !== "live") return;
+
+    const alertingAircraft = aircraftList.filter(hasAircraftAlert);
+    const activeIds = new Set(alertingAircraft.map((aircraft) => aircraft.hex));
+    const newAlert = alertingAircraft.find(
+      (aircraft) => !activeAlertIdsRef.current.has(aircraft.hex),
+    );
+    activeAlertIdsRef.current = activeIds;
+
+    if (
+      newAlert &&
+      Number.isFinite(newAlert.lat) &&
+      Number.isFinite(newAlert.lon)
+    ) {
+      setViewState((current) => ({
+        ...current,
+        latitude: newAlert.lat!,
+        longitude: newAlert.lon!,
+        zoom: Math.max(current.zoom, 6),
+      }));
+    }
+  }, [aircraftList, viewMode]);
 
   const replayState: string = historyStatusInfo.state;
   const canSkip = historyMode && replayState === "playing";
@@ -419,7 +448,7 @@ function App() {
             : aircraftList,
       iconAtlas: AIRPLANE_ICON,
       iconMapping: ICON_MAPPING,
-      getIcon: () => "marker",
+      getIcon: (d: Aircraft) => (hasAircraftAlert(d) ? "alert" : "marker"),
       getPosition: (d: Aircraft) => [d.lon ?? -95.7129, d.lat ?? 37.0902],
       getSize: 24,
       getAngle: (d: any) => {
@@ -427,13 +456,12 @@ function App() {
           d.true_heading ?? d.nav_heading ?? d.heading ?? d.track ?? 0;
         return -rawHeading;
       },
-      getColor: (d: Aircraft) =>
-        hasAircraftAlert(d) ? [244, 63, 94] : [54, 246, 180],
       pickable: true,
       onHover: (info) => setHoveredAircraft((info.object as Aircraft) || null),
       updateTriggers: {
         data: [aircraftList, searchedAircraft, viewMode],
         getAngle: [aircraftList, searchedAircraft, viewMode],
+        getIcon: [aircraftList, searchedAircraft, viewMode],
       },
     }),
   ];
