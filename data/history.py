@@ -35,27 +35,31 @@ _swap_lock = threading.Lock()
 _swap_status = {"state": "idle", "date": None, "done_bytes": 0, "total_bytes": 0, "error": None}
 
 
+# GET a URL (the GitHub API) and return the parsed JSON body.
 def _get_json(url):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=30) as response:
         return json.load(response)
 
 
+# (first, last) day in the archive as "YYYY-MM-DD", e.g. for a date picker's limits.
+# First is FIRST_DAY, last is yesterday in UTC.
 def available_range():
-    """(first, last) day in the archive as "YYYY-MM-DD", e.g. for a date picker's limits."""
     yesterday = datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)
     return FIRST_DAY, yesterday.isoformat()
 
 
+# Raise ValueError unless date is a real "YYYY-MM-DD" day inside available_range().
 def _check_date(date):
-    """Raise ValueError unless date is a YYYY-MM-DD day inside available_range()."""
     first, last = available_range()
     if datetime.date.fromisoformat(date).isoformat() != date or not first <= date <= last:
         raise ValueError(f"{date!r} is not a day in the history archive ({first} to {last})")
 
 
+# Look up one day's release on GitHub and return [(url, size), ...] of its tar parts, in order.
+# Tries each pod in PODS, in that year's repo and then the previous year's.
+# Raises LookupError if no release exists for the day.
 def find_release(date):
-    """[(url, size), ...] of the tar parts for one day, e.g. "2026-09-24", in order."""
     _check_date(date)
     year = int(date[:4])
     for pod in PODS:
@@ -75,9 +79,11 @@ def find_release(date):
     raise LookupError(f"no adsb.lol history release found for {date}")
 
 
+# A file-like object that reads the tar parts back to back as if they were one file,
+# so tarfile can stream a split archive without saving the parts to disk.
 class _Downloads:
-    """Reads several URLs back to back as if they were one file, reporting progress."""
 
+    # Remember the part URLs and total size; nothing downloads until read() is called.
     def __init__(self, parts, on_progress=None):
         self._urls = [url for url, _ in parts]
         self._response = None
@@ -86,6 +92,8 @@ class _Downloads:
         self.done = 0
         self._next_report = 0
 
+    # Return the next chunk of bytes, opening the next part when one runs out,
+    # and b"" once every part is read. Reports progress as it goes.
     def read(self, size=-1):
         while True:
             if self._response is None:
@@ -106,8 +114,9 @@ class _Downloads:
             self._response = None
 
 
+# Stream a day's tar parts, keep only the trace_full_* files, and move them to final.
+# Works in root/.partial so an interrupted download never looks like a finished day.
 def _download(date, parts, final, root, on_progress=None):
-    """Stream a day's tar parts, keep only the trace files, and move them to final."""
     partial = os.path.join(root, ".partial")
     shutil.rmtree(partial, ignore_errors=True)  # left over from an interrupted download
     print(f"{date}: {sum(size for _, size in parts) / 1e9:.1f} GB in {len(parts)} part(s)")
@@ -131,8 +140,8 @@ def _download(date, parts, final, root, on_progress=None):
     return final
 
 
+# The folder holding a day's traces (fixed or swap), or None if that day isn't on disk.
 def day_dir(date, root=ARCHIVE_DIR):
-    """The folder holding a day's traces, or None if that day isn't on disk."""
     for kind in ("fixed", "swap"):
         path = os.path.join(root, kind, date)
         if os.path.isdir(path):
@@ -140,8 +149,8 @@ def day_dir(date, root=ARCHIVE_DIR):
     return None
 
 
+# Path of one aircraft's trace file on a day on disk, or None if the day or aircraft isn't there.
 def trace_path(date, icao24, root=ARCHIVE_DIR):
-    """Path of one aircraft's trace file for a day on disk, or None."""
     folder = day_dir(date, root)
     if folder is None:
         return None
@@ -150,8 +159,9 @@ def trace_path(date, icao24, root=ARCHIVE_DIR):
     return path if os.path.exists(path) else None
 
 
+# The days on disk, i.e. the days you can replay:
+# {"fixed": ["2026-09-24", ...], "swap": "2026-09-20" or None}
 def days_on_disk(root=ARCHIVE_DIR):
-    """{"fixed": ["2026-09-24", ...], "swap": "2026-09-20" or None}: the days you can pick from."""
     fixed_folder = os.path.join(root, "fixed")
     swap_folder = os.path.join(root, "swap")
     fixed = sorted(os.listdir(fixed_folder)) if os.path.isdir(fixed_folder) else []
@@ -159,8 +169,9 @@ def days_on_disk(root=ARCHIVE_DIR):
     return {"fixed": fixed, "swap": swap[0] if swap else None}
 
 
+# Make the fixed days on disk match days: download the missing ones and delete
+# the ones no longer listed. Run once per machine with `python3 -m data.history setup`.
 def setup_fixed_days(days=FIXED_DAYS, root=ARCHIVE_DIR, find=find_release):
-    """Download the fixed days that are missing and delete fixed days no longer listed."""
     for date in days_on_disk(root)["fixed"]:
         if date not in days:
             shutil.rmtree(os.path.join(root, "fixed", date))
@@ -170,6 +181,9 @@ def setup_fixed_days(days=FIXED_DAYS, root=ARCHIVE_DIR, find=find_release):
             _download(date, find(date), os.path.join(root, "fixed", date), root)
 
 
+# The swap itself, shared by swap_day and start_swap (the caller holds the lock).
+# Does nothing if the day is already on disk; otherwise finds the release first,
+# then deletes the old swap day and downloads the new one.
 def _swap(date, root, find, on_progress):
     _check_date(date)  # raises ValueError for a malformed date
     existing = day_dir(date, root)
@@ -180,8 +194,9 @@ def _swap(date, root, find, on_progress):
     return _download(date, parts, os.path.join(root, "swap", date), root, on_progress)
 
 
+# Make date available, replacing the previous swap day. Blocks until done (~10 min).
+# Raises RuntimeError if another swap is already running.
 def swap_day(date, root=ARCHIVE_DIR, find=find_release, on_progress=None):
-    """Make date available, replacing the previous swap day. Blocks until done (~10 min)."""
     if not _swap_lock.acquire(blocking=False):
         raise RuntimeError(f"already downloading {_swap_status['date']}")
     try:
@@ -190,15 +205,18 @@ def swap_day(date, root=ARCHIVE_DIR, find=find_release, on_progress=None):
         _swap_lock.release()
 
 
+# What the frontend calls: start swap_day in a background thread and return at once.
+# Follow it with swap_status(). Raises RuntimeError if a swap is already running.
 def start_swap(date, root=ARCHIVE_DIR, find=find_release):
-    """Start swap_day in the background and return at once; follow it with swap_status()."""
     if not _swap_lock.acquire(blocking=False):
         raise RuntimeError(f"already downloading {_swap_status['date']}")
     _swap_status.update(state="downloading", date=date, done_bytes=0, total_bytes=0, error=None)
 
+    # Called as bytes arrive; updates the numbers swap_status() returns.
     def on_progress(done, total):
         _swap_status.update(done_bytes=done, total_bytes=total)
 
+    # The background thread: do the swap, record ready or failed, then free the lock.
     def run():
         try:
             _swap(date, root, find, on_progress)
@@ -211,11 +229,13 @@ def start_swap(date, root=ARCHIVE_DIR, find=find_release):
     threading.Thread(target=run, daemon=True).start()
 
 
+# Progress of the last start_swap, for the frontend to poll:
+# {"state": "idle"|"downloading"|"ready"|"failed", "date", "done_bytes", "total_bytes", "error"}
 def swap_status():
-    """{"state": "idle"|"downloading"|"ready"|"failed", "date", "done_bytes", "total_bytes", "error"}"""
     return dict(_swap_status)
 
 
+# Command line: setup | swap DATE | list (see the top of this file).
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manage adsb.lol history days on disk.")
     commands = parser.add_subparsers(dest="command", required=True)
