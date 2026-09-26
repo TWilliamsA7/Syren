@@ -39,6 +39,16 @@ interface Aircraft {
   anomaly?: string;  // set by the AI model, see docs/protocol.md; "none" when nothing is wrong
 }
 
+// The aircraft the map is following: onlyThis hides every other plane,
+// centre is switched off when the user drags the map away
+interface Followed {
+  hex: string;
+  onlyThis: boolean;
+  centre: boolean;
+}
+
+const FOLLOW_ZOOM = 8;  // zoom in at least this far when starting to follow an aircraft
+
 // Gemini's answer for one aircraft, kept with its hex so a late reply can't land on another plane
 interface GeminiAnswer {
   hex: string;
@@ -109,16 +119,18 @@ function App() {
   // Search state
   const [searchDate, setSearchDate] = useState<string>('2026-09-24');
   const [searchStartTime, setSearchStartTime] = useState<string>('16:00');
-  const [searchIcao, setSearchIcao] = useState<string>('');
-  
+
+  // Find/follow one aircraft, in live or replay
+  const [findQuery, setFindQuery] = useState<string>('');
+  const [findError, setFindError] = useState<string>('');
+  const [followed, setFollowed] = useState<Followed | null>(null);
+
   // History / Replay state
   const [historyMode, setHistoryMode] = useState<boolean>(false);
   const [historyStatusInfo, setHistoryStatusInfo] = useState<any>({ state: 'idle' });
   const [replayClockFormatted, setReplayClockFormatted] = useState<string>('');
 
   // View states
-  const [viewMode, setViewMode] = useState<'live' | 'search_result'>('live');
-  const [searchedAircraft, setSearchedAircraft] = useState<Aircraft | null>(null);
   const [searchError, setSearchError] = useState<string>('');
   const [hoveredAircraft, setHoveredAircraft] = useState<Aircraft | null>(null);
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);  // pinned by a click
@@ -293,41 +305,46 @@ function App() {
 
     // Trigger backend history replay session for the selected date and start time
     startHistory(searchDate, startTime);
-
-    const query = searchIcao.trim().toLowerCase();
-    if (query) {
-      const found = aircraftList.find(
-        a => 
-          a.hex.toLowerCase() === query || 
-          (a.r && a.r.toLowerCase() === query) || 
-          (a.flight && a.flight.trim().toLowerCase() === query)
-      );
-
-      if (found) {
-        setSearchedAircraft({ ...found, timestamp: searchDate });
-        if (found.lat && found.lon) {
-          setViewState(v => ({
-            ...v,
-            longitude: found.lon!,
-            latitude: found.lat!,
-            zoom: 9
-          }));
-        }
-      }
-    } else {
-      setSearchedAircraft(null);
-    }
-
-    setViewMode('search_result');
   };
 
   const returnToLive = () => {
     stopHistory();
-    setViewMode('live');
-    setSearchedAircraft(null);
-    setSearchIcao('');
     setSearchError('');
   };
+
+  // Zoom to an aircraft, pin its popup, and keep the map centred on it as new positions arrive
+  const followAircraft = (plane: Aircraft, onlyThis: boolean) => {
+    setFollowed({ hex: plane.hex, onlyThis, centre: true });
+    setSelectedAircraft(plane);
+    if (plane.lat != null && plane.lon != null) {
+      setViewState(v => ({ ...v, latitude: plane.lat!, longitude: plane.lon!, zoom: Math.max(v.zoom, FOLLOW_ZOOM) }));
+    }
+  };
+
+  // Find an aircraft in whatever is showing (live or replay) by callsign, ICAO hex or registration
+  const findAircraft = (e: React.FormEvent) => {
+    e.preventDefault();
+    const query = findQuery.trim().toLowerCase();
+    if (!query) return;
+    const found = aircraftList.find(a =>
+      a.hex.toLowerCase() === query ||
+      a.flight?.trim().toLowerCase() === query ||
+      a.r?.toLowerCase() === query
+    );
+    if (found) {
+      setFindError('');
+      followAircraft(found, true);
+    } else {
+      setFindError(`${findQuery.trim()} isn't in the ${historyMode ? 'replay' : 'live feed'} right now.`);
+    }
+  };
+
+  const followedAircraft = followed ? aircraftList.find(a => a.hex === followed.hex) ?? null : null;
+
+  // While following, the map is centred on the aircraft's latest position (zoom stays the user's)
+  const mapViewState = followed?.centre && followedAircraft?.lat != null && followedAircraft?.lon != null
+    ? { ...viewState, latitude: followedAircraft.lat, longitude: followedAircraft.lon }
+    : viewState;
 
   const handleRegionChange = (region: Region) => {
     setCurrentRegion(region);
@@ -410,9 +427,7 @@ function App() {
   const layers = [
     new IconLayer({
       id: 'aircraft-icon-layer',
-      data: viewMode === 'live' 
-        ? aircraftList 
-        : (searchedAircraft ? [searchedAircraft] : aircraftList),
+      data: followed?.onlyThis ? aircraftList.filter(a => a.hex === followed.hex) : aircraftList,
       iconAtlas: AIRPLANE_ICON,
       iconMapping: ICON_MAPPING,
       getIcon: (d: Aircraft) => (isAlert(d) ? 'alert' : 'marker'),
@@ -426,9 +441,9 @@ function App() {
       onHover: info => setHoveredAircraft(info.object as Aircraft || null),
       onClick: info => { if (info.object) setSelectedAircraft(info.object as Aircraft); },
       updateTriggers: {
-        data: [aircraftList, searchedAircraft, viewMode],
-        getAngle: [aircraftList, searchedAircraft, viewMode],
-        getIcon: [aircraftList, searchedAircraft, viewMode]
+        data: [aircraftList, followed],
+        getAngle: [aircraftList, followed],
+        getIcon: [aircraftList, followed]
       }
     })
   ];
@@ -459,8 +474,12 @@ function App() {
 
           {/* Deck.GL Canvas Integration with Geographic Coordinate mapping */}
           <DeckGL
-            viewState={viewState}
-            onViewStateChange={(e: any) => setViewState(e.viewState)}
+            viewState={mapViewState}
+            onViewStateChange={(e: any) => {
+              setViewState(e.viewState);
+              // dragging the map stops re-centring on a followed aircraft, so it doesn't snap back
+              if (e.interactionState?.isDragging) setFollowed(f => (f?.centre ? { ...f, centre: false } : f));
+            }}
             controller={true}
             layers={layers}
             style={{ position: 'absolute', inset: 0, zIndex: 2 }}
@@ -514,6 +533,49 @@ function App() {
         <aside className="sidebar">
 
           <section className="panel-section">
+            <h2>Find aircraft</h2>
+            <form onSubmit={findAircraft} className="find-row">
+              <label className="field">
+                <input
+                  type="text"
+                  placeholder="Callsign, ICAO hex or registration"
+                  aria-label="Callsign, ICAO hex or registration"
+                  value={findQuery}
+                  onChange={(e) => setFindQuery(e.target.value)}
+                />
+              </label>
+              <button type="submit" className="btn">Find</button>
+            </form>
+            {findError && <p className="form-error">{findError}</p>}
+
+            {followed && (
+              <div className="following">
+                <div className="following-line">
+                  <span className={`dot ${followedAircraft ? 'accent' : ''}`} />
+                  <span>{followed.centre && followedAircraft ? 'Following' : 'Found'}</span>
+                  <strong className="mono">{followedAircraft?.flight?.trim() || followed.hex}</strong>
+                  <button className="link" onClick={() => setFollowed(null)}>Stop</button>
+                </div>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={followed.onlyThis}
+                    onChange={(e) => setFollowed({ ...followed, onlyThis: e.target.checked })}
+                  />
+                  Only show this aircraft
+                </label>
+                {!followedAircraft
+                  ? <p className="hint">Not in the {historyMode ? 'replay' : 'live feed'} right now.</p>
+                  : !followed.centre && (
+                    <button className="link" onClick={() => followAircraft(followedAircraft, followed.onlyThis)}>
+                      Re-centre on it
+                    </button>
+                  )}
+              </div>
+            )}
+          </section>
+
+          <section className="panel-section">
             <div className="section-head">
               <h2>Replay a day</h2>
               {historyMode && <button className="link" onClick={returnToLive}>Back to live</button>}
@@ -538,10 +600,6 @@ function App() {
                   />
                 </label>
               </div>
-              <label className="field">
-                <span>Aircraft <em>optional</em></span>
-                <input type="text" placeholder="ICAO hex or callsign, e.g. ac0094" value={searchIcao} onChange={(e) => setSearchIcao(e.target.value)} />
-              </label>
               {searchError && <p className="form-error">{searchError}</p>}
               <button type="submit" className="btn primary">Load replay</button>
             </form>
@@ -604,7 +662,7 @@ function App() {
               <ul className="emergency-list">
                 {emergencyAircraft.map(a => (
                   <li key={a.hex}>
-                    <button onClick={() => setSelectedAircraft(a)} title="Show this aircraft's details">
+                    <button onClick={() => followAircraft(a, false)} title="Zoom to this aircraft and follow it">
                       <span className="mono">{a.flight?.trim() || a.hex}</span>
                       <span className="emergency-detail mono">{a.squawk ?? '----'} · {a.emergency}</span>
                     </button>
@@ -622,21 +680,6 @@ function App() {
               <dt>Last update</dt><dd>{lastUpdated}</dd>
             </dl>
           </section>
-
-          {searchedAircraft && viewMode === 'search_result' && (
-            <section className="panel-section">
-              <h2>Aircraft</h2>
-              <p className="aircraft-name">
-                {searchedAircraft.flight?.trim() || searchedAircraft.hex}
-                <span className="mono">{searchedAircraft.hex}</span>
-              </p>
-              <dl className="kv">
-                <dt>Altitude</dt><dd>{formatNumber(searchedAircraft.alt_baro, 'ft')}</dd>
-                <dt>Ground speed</dt><dd>{formatNumber(searchedAircraft.gs, 'kt')}</dd>
-                <dt>Squawk</dt><dd>{searchedAircraft.squawk || '—'}</dd>
-              </dl>
-            </section>
-          )}
 
         </aside>
 

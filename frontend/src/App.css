@@ -524,6 +524,55 @@ html, body, #root {
   color: var(--red);
 }
 
+.find-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.find-row .field {
+  margin-bottom: 0;
+}
+
+.find-row + .form-error {
+  margin: 8px 0 0;
+}
+
+.following {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.following-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.following-line .link {
+  margin-left: auto;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--accent);
+}
+
+.following > .link,
+.following > .hint {
+  margin-top: 6px;
+}
+
 .emergency-list {
   list-style: none;
   margin: 8px 0 0 15px;
