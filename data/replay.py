@@ -3,6 +3,7 @@ import bisect
 import datetime
 import json
 import os
+import re
 import threading
 import time
 
@@ -12,12 +13,25 @@ from data.trace import export_day, open_jsonl
 HISTORY_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "public", "history.jsonl")
 GONE_AFTER_S = 60  # drop an aircraft from the map after this long without a new state
+# Lines written by make_flight_state + json.dumps start like {"timestamp": 1790265600.03, "icao24": "a1b2c3",
+# so both can be read without parsing the whole line, which matters for millions of lines.
+LINE_START = re.compile(r'\{"timestamp": ([^,]+), "icao24": "([^"]+)"')
 
 _lock = threading.Lock()
+_export_lock = threading.Lock()  # one export at a time; starting the same hour twice reuses it
 _generation = 0  # bumped by every start and stop, so an old background thread knows to quit
 _player = None
 _status = {"state": "idle", "date": None, "clock": None, "first": None, "last": None,
            "done_bytes": 0, "total_bytes": 0, "error": None}
+
+
+# (timestamp, icao24) of one FlightState JSON line.
+def _time_and_icao24(line):
+    match = LINE_START.match(line)
+    if match:
+        return float(match[1]), match[2]
+    state = json.loads(line)  # a line written some other way
+    return state["timestamp"], state["icao24"]
 
 
 # The states of one exported file, and a clock that can move either way through them.
@@ -28,8 +42,8 @@ class Player:
         rows = []
         with open_jsonl(path) as f:
             for line in f:
-                state = json.loads(line)
-                rows.append((state["timestamp"], state["icao24"], line.rstrip("\n") + "\n"))
+                timestamp, icao24 = _time_and_icao24(line)
+                rows.append((timestamp, icao24, line.rstrip("\n") + "\n"))
         if not rows:
             raise ValueError(f"{path} has no states, try another time or a bigger area")
         rows.sort(key=lambda row: row[0])
@@ -84,7 +98,9 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
         if not os.path.exists(export):
             if not _set(generation, state="exporting"):
                 return
-            export_day(date, export, start, hours, root=root)
+            with _export_lock:
+                if not os.path.exists(export):  # another start may have just made it
+                    export_day(date, export, start, hours, root=root)
         player = Player(export)
         with _lock:
             if generation != _generation:

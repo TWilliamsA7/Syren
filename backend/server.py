@@ -1,11 +1,16 @@
 
 import json
+import os
+import subprocess
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from data.history import available_range, days_on_disk
 from data.replay import history_status, skip, start_history, stop_history
 
 PORT = 8000
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LIVE_FILE = os.path.join(REPO, "frontend", "public", "data.jsonl")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,6 +63,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# Start the live feed in its own process, then serve the history API until Ctrl-C.
 if __name__ == "__main__":
+    live = subprocess.Popen([sys.executable, "-m", "data.live_adapter", LIVE_FILE], cwd=REPO)
     print(f"history API on http://localhost:{PORT}")
-    ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    try:
+        ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        live.terminate()
