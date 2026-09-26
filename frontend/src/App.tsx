@@ -242,13 +242,20 @@ function App() {
       getIcon: () => 'marker',
       getPosition: (d: Aircraft) => [d.lon ?? -95.7129, d.lat ?? 37.0902],
       getSize: 24,
-      getAngle: (d: Aircraft) => d.track ?? d.nav_heading ?? 0,
+      // Fix: Negate the angle because Deck.GL rotates counter-clockwise, 
+      // while aviation headings are clockwise (0-360).
+      getAngle: (d: any) => {
+        const rawHeading = d.true_heading ?? d.nav_heading ?? d.heading ?? d.track ?? 0;
+        return -rawHeading; 
+      },
       getColor: (d: Aircraft) => 
         (d.emergency && d.emergency !== 'none') ? [244, 63, 94] : [54, 246, 180],
       pickable: true,
       onHover: info => setHoveredAircraft(info.object as Aircraft || null),
       updateTriggers: {
-        data: [aircraftList, searchedAircraft, viewMode]
+        data: [aircraftList, searchedAircraft, viewMode],
+        // Added updateTriggers so it recalculates angles smoothly if data updates
+        getAngle: [aircraftList, searchedAircraft, viewMode] 
       }
     })
   ];
