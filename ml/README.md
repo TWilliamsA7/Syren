@@ -237,3 +237,28 @@ so the stateful score was not connected to the live warning path. The full
 result is written to
 `data/learning/ten_day_development/temporal_risk_pilot/pilot_2025-08-15.json`.
 These development data cannot establish future-date warning performance.
+
+# Positive-first pattern pilot
+
+`python -m ml.positive_pattern_pilot` makes a 214-event casebook from the raw
+ten-minute pre-declaration traces, excluding squawk and emergency status from
+the behavioral timeline. It discovers simple, named patterns from positive
+windows on nine dates, requiring recurrence across at least five events, five
+aircraft, and three dates. The 2026-05-15 aircraft are purged from discovery.
+The frozen patterns are replayed on that one date with ten-minute alert
+suppression. No fixed false-alert budget or live threshold is selected.
+
+The lowest-alert individual pattern in this pilot, altitude reversal, warned
+8 of 24 events a median of 175 seconds before declaration, with 127 alerts in
+182.7 control flight-hours (695 per 1,000 hours, about one per 1.4 hours).
+At approximately the same false-alert rate, the previous Isolation Forest
+warned 2 events and the boosted tree warned 1. Adding patterns caught up to
+20 events but raised the control alert rate to 6,042 per 1,000 hours. The
+patterns were therefore kept research-only. Four events were still missed by
+that broad union, including radio-failure and general-status declarations.
+
+The full per-pattern results, subtype counts, matched baseline points,
+missed-event IDs, and control alert examples are in
+`data/learning/ten_day_development/positive_pattern_pilot/pilot_2026-05-15.json`.
+The raw casebook is in the same directory. All ten dates are development data,
+and repeated exploratory use of them limits generalization claims.
