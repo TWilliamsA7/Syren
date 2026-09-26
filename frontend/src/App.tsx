@@ -72,6 +72,7 @@ function App() {
 
   // Search state
   const [searchDate, setSearchDate] = useState<string>('2026-09-24');
+  const [searchStartTime, setSearchStartTime] = useState<string>('16:00');
   const [searchIcao, setSearchIcao] = useState<string>('');
   
   // History / Replay state
@@ -241,8 +242,8 @@ function App() {
       return;
     }
 
-    // Trigger backend history replay session for the selected date
-    startHistory(searchDate, "16:00");
+    // Trigger backend history replay session for the selected date and start time
+    startHistory(searchDate, searchStartTime);
 
     const query = searchIcao.trim().toLowerCase();
     if (query) {
@@ -328,7 +329,7 @@ function App() {
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: '1rem' }}>
             {!historyMode 
               ? 'ADS-B Live US Airspace Feed' 
-              : `Replay Mode: ${searchDate} | ${replayClockFormatted || historyStatusInfo.state}`}
+              : `Replay Mode: ${searchDate} @ ${searchStartTime} | ${replayClockFormatted || historyStatusInfo.state}`}
           </span>
         </div>
 
@@ -438,33 +439,44 @@ function App() {
             </div>
             
             <form onSubmit={handleSearch}>
-              <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                <div style={{ flex: 1 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <div>
                   <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Date (Required)</label>
                   <input 
                     type="date" 
                     value={searchDate} 
                     onChange={(e) => setSearchDate(e.target.value)} 
-                    style={{ margin: '0.25rem 0 0 0' }}
+                    style={{ margin: '0.25rem 0 0 0', width: '100%' }}
                   />
                 </div>
-                <div style={{ flex: 1.2 }}>
-                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>ICAO / Callsign</label>
+                <div>
+                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Start Time (UTC)</label>
                   <input 
-                    type="text" 
-                    placeholder="e.g. ac0094" 
-                    value={searchIcao} 
-                    onChange={(e) => setSearchIcao(e.target.value)} 
-                    style={{ margin: '0.25rem 0 0 0' }}
+                    type="time" 
+                    value={searchStartTime} 
+                    onChange={(e) => setSearchStartTime(e.target.value)} 
+                    style={{ margin: '0.25rem 0 0 0', width: '100%' }}
                   />
                 </div>
               </div>
+
+              <div style={{ marginBottom: '0.5rem' }}>
+                <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>ICAO / Callsign</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g. ac0094" 
+                  value={searchIcao} 
+                  onChange={(e) => setSearchIcao(e.target.value)} 
+                  style={{ margin: '0.25rem 0 0 0', width: '100%' }}
+                />
+              </div>
+
               {searchError && <div style={{ color: 'var(--red)', fontSize: '0.7rem', marginBottom: '0.375rem' }}>{searchError}</div>}
               
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.35rem', marginBottom: '0.35rem' }}>
                 <button 
                   type="button" 
-                  onClick={() => startHistory(searchDate, "16:00")}
+                  onClick={() => startHistory(searchDate, searchStartTime)}
                   style={{ backgroundColor: 'var(--accent)', color: 'var(--text-main)', border: 'none', padding: '0.4rem', borderRadius: '0.375rem', fontWeight: 'bold', fontSize: '0.7rem', cursor: 'pointer' }}>
                   Enter a date
                 </button>
