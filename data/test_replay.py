@@ -55,6 +55,27 @@ def test_player():
     assert player.clock == 170, "can't go past the last state"
 
 
+def test_player_runs_detection_and_recomputes_on_rewind():
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "states.jsonl")
+        emergency = state("a80595", 100)
+        emergency["status"]["squawk"] = "7700"
+        clean = state("a80595", 110)
+        write_states(path, [emergency, clean])
+        player = Player(path)
+
+        first = json.loads(player.snapshot()[0])
+        assert any(a["type"] == "EMERGENCY_SQUAWK" for a in first["detection"]["anomalies"])
+
+        player.clock = 110
+        second = json.loads(player.snapshot()[0])
+        assert second["detection"]["anomalies"] == []
+
+        player.clock = 100
+        rewound = json.loads(player.snapshot()[0])
+        assert any(a["type"] == "EMERGENCY_SQUAWK" for a in rewound["detection"]["anomalies"])
+
+
 def test_start_skip_stop():
     with tempfile.TemporaryDirectory() as root:
         day = os.path.join(root, "fixed", "2026-09-24")

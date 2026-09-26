@@ -1,7 +1,8 @@
 import sys
 
 from shared.flight_state import validate_flight_state
-from data.live_adapter import ADSB_FI_URL, ADSB_LOL_URL, fetch_live, parse_response
+from data.live_adapter import ADSB_FI_URL, ADSB_LOL_URL, enrich_snapshot, fetch_live, parse_response
+from detection.engine import build_default_engine
 
 AIRCRAFT = {
     "hex": "a5d28c", "type": "adsb_icao", "flight": "UAL3776 ",
@@ -22,6 +23,26 @@ def test_both_response_formats():
 def test_empty_response():
     assert parse_response({"ac": [], "now": 1790400021000}) == []
     assert parse_response({"now": 1790400021.0}) == []
+
+
+def test_live_snapshot_contains_frontend_detection_payload():
+    aircraft = {**AIRCRAFT, "squawk": "7700", "emergency": "none"}
+    states = parse_response({"ac": [aircraft], "now": 1790400021000})
+    enriched = enrich_snapshot(states, build_default_engine(), {}, {})
+    detection = enriched[0]["detection"]
+    assert any(item["type"] == "EMERGENCY_SQUAWK" for item in detection["anomalies"])
+    assert detection["severity"] == "critical"
+
+
+def test_live_snapshot_ignores_out_of_order_positions():
+    engine = build_default_engine()
+    detection_cache = {}
+    timestamp_cache = {}
+    newest = parse_response({"ac": [AIRCRAFT], "now": 1790400021000})
+    older = parse_response({"ac": [AIRCRAFT], "now": 1790400019000})
+    enrich_snapshot(newest, engine, detection_cache, timestamp_cache)
+    enriched = enrich_snapshot(older, engine, detection_cache, timestamp_cache)
+    assert enriched[0]["detection"]["timestamp"] == newest[0]["timestamp"]
 
 
 LIVE_URLS = {

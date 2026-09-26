@@ -9,6 +9,7 @@ import time
 
 from data.history import ARCHIVE_DIR, day_dir, swap_day
 from data.trace import export_day, open_jsonl
+from detection.engine import build_default_engine
 
 HISTORY_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "public", "history.jsonl")
@@ -52,6 +53,26 @@ class Player:
         self.lines = [row[2] for row in rows]
         self.first, self.last = self.times[0], self.times[-1]
         self.clock = self.first
+        # Replay feeds are raw FlightStates too. Advance the same engine in
+        # timestamp order as the replay clock moves, and reset/replay on rewind.
+        self._detection_engine = build_default_engine()
+        self._next_detection_index = 0
+        self._detection_results = {}
+        self._detection_clock = self.first
+
+    def _advance_detection(self):
+        if self.clock < self._detection_clock:
+            self._detection_engine.reset()
+            self._next_detection_index = 0
+            self._detection_results.clear()
+        end = bisect.bisect_right(self.times, self.clock)
+        while self._next_detection_index < end:
+            index = self._next_detection_index
+            state = json.loads(self.lines[index])
+            result = self._detection_engine.update_mapping(state)
+            self._detection_results[self.icao24s[index]] = result
+            self._next_detection_index += 1
+        self._detection_clock = self.clock
 
     # Move the clock by seconds (negative goes back), staying inside the file.
     def skip(self, seconds):
@@ -59,20 +80,42 @@ class Player:
 
     # JSON lines of the latest state of each aircraft heard in the GONE_AFTER_S before the clock.
     def snapshot(self):
+        self._advance_detection()
         begin = bisect.bisect_left(self.times, self.clock - GONE_AFTER_S)
         end = bisect.bisect_right(self.times, self.clock)
         latest = {}
         for i in range(begin, end):
             latest[self.icao24s[i]] = self.lines[i]
-        return list(latest.values())
+        enriched = []
+        for icao24, line in latest.items():
+            state = json.loads(line)
+            detection = self._detection_results.get(icao24)
+            if detection is not None:
+                state["detection"] = detection
+            enriched.append(json.dumps(state, separators=(",", ":")) + "\n")
+        return enriched
 
 
 # Replace out_path in one step, so the frontend never reads a half-written file.
+# On Windows a reader can briefly hold the destination without delete sharing.
+# Retry that transient lock; if it persists for this tick, keep the last good
+# snapshot and let the playback loop try again on its next update.
 def write_snapshot(lines, out_path):
     temporary = out_path + ".tmp"
     with open(temporary, "w") as out:
         out.writelines(lines)
-    os.replace(temporary, out_path)
+    for attempt in range(5):
+        try:
+            os.replace(temporary, out_path)
+            return True
+        except PermissionError:
+            if attempt == 4:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+                return False
+            time.sleep(0.05 * (2 ** attempt))
 
 
 # Update the status, unless a newer start or stop has replaced this thread. Returns False then.

@@ -3,6 +3,7 @@ import sys
 import urllib.request
 import time
 
+from detection.engine import DetectionEngine, build_default_engine
 from shared.flight_state import make_flight_state, validate_flight_state
 
 STALE_AFTER_S = 20
@@ -72,19 +73,57 @@ def fetch_live(api_url, lat, lon, radius_nm, timeout_s=10):
         data = json.load(response)
     return parse_response(data)
 
+
+def enrich_snapshot(states, engine, detection_cache, timestamp_cache):
+    """Attach detector results to one live fleet snapshot.
+
+    ADS-B services can repeat a slightly older position for a track, so those
+    samples reuse its last result instead of moving the streaming engine back
+    in time. All accepted aircraft are evaluated together so fleet conflicts
+    are included too.
+    """
+    current = []
+    for state in states:
+        icao24 = state["icao24"].strip().lower()
+        if state["timestamp"] >= timestamp_cache.get(icao24, float("-inf")):
+            current.append(state)
+
+    if current:
+        results = engine.update_fleet(current)
+        for state, result in zip(current, results):
+            icao24 = state["icao24"].strip().lower()
+            detection_cache[icao24] = result.to_mapping()
+            timestamp_cache[icao24] = state["timestamp"]
+
+    return [
+        {**state, "detection": detection_cache.get(state["icao24"].strip().lower(), {
+            "icao24": state["icao24"].strip().lower(),
+            "flight_id": state.get("flight_id") or state["icao24"],
+            "timestamp": state["timestamp"],
+            "risk_score": 0.0,
+            "severity": "normal",
+            "anomalies": [],
+        })}
+        for state in states
+    ]
+
 if __name__ == "__main__":
     out_path = sys.argv[1] if len(sys.argv) > 1 else "public/data.jsonl"
     print(f"Starting continuous live feed loop targeting: {out_path} (every 5s)...")
 
+    engine: DetectionEngine = build_default_engine()
+    detection_cache = {}
+    timestamp_cache = {}
     try:
         while True:
             start_time = time.time()
             try:
                 states = fetch_live(ADSB_LOL_URL, 38.0, -96.0, 1450)
+                enriched_states = enrich_snapshot(states, engine, detection_cache, timestamp_cache)
                 
                 # Write atomically or directly to the target file path
                 with open(out_path, "w") as out:
-                    for state in states:
+                    for state in enriched_states:
                         errors = validate_flight_state(state)
                         if not errors:
                             out.write(json.dumps(state) + "\n")

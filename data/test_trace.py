@@ -76,11 +76,15 @@ def test_export_day():
         write_trace(day, "b00001", [point(16 * 3600 + 5, lat=51.5, lon=-0.1)])  # London, outside the US
 
         out_path = os.path.join(root, "exports", "day.jsonl.gz")
-        counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root)
+        progress = []
+        counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root,
+                            on_progress=lambda done, total: progress.append((done, total)))
         with open_jsonl(out_path) as f:
             states = [json.loads(line) for line in f]
 
         assert counts == (3, 2)
+        assert progress[0] == (0, 3) and progress[-1] == (3, 3)
+        assert [done for done, _ in progress] == sorted(done for done, _ in progress)
         assert os.listdir(os.path.dirname(out_path)) == ["day.jsonl.gz"], "no partial file left"
         assert [(state["icao24"], state["timestamp"]) for state in states] == [
             ("abc10c", FOUR_PM + 5), ("a80595", FOUR_PM + 10), ("a80595", FOUR_PM + 1800)]

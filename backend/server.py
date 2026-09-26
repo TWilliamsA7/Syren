@@ -36,8 +36,15 @@ class Handler(BaseHTTPRequestHandler):
     # GET /api/ask_aircraft/<job>, polled every second for a Gemini answer.
     def do_GET(self):
         if self.path.startswith("/api/ask_aircraft/"):
-            status = question_status(self.path.rsplit("/", 1)[1])
+            status = question_status(self.path.rsplit("/", 1)[1].split("?", 1)[0])
             self._reply(status if status else {"error": "unknown question"}, 200 if status else 404)
+        elif self.path.split("?", 1)[0] == "/api/aircraft":
+            try:
+                with open(LIVE_FILE, "r", encoding="utf-8") as feed:
+                    aircraft = [json.loads(line) for line in feed if line.strip()]
+            except FileNotFoundError:
+                aircraft = []
+            self._reply(aircraft)
         elif self.path == "/api/history_status":
             self._reply(history_status())
         elif self.path == "/api/history_days":
