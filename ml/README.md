@@ -220,3 +220,20 @@ model and threshold on validation data, then replay on newly collected
 untouched dates and report event recall, warning time, and false alerts per
 1,000 observed flight-hours with uncertainty from independent flights or
 events. Device benchmarking is outside this experiment.
+# Stateful behavior warning pilot
+
+`python -m ml.temporal_risk_pilot` replays a fixed, causal evidence score on
+2025-08-15. It uses altitude, vertical-rate, speed, track, and observation-gap
+features; declaration status and squawk are excluded from the advance-warning
+score. Evidence decays with time and needs at least two distinct behavior types.
+The cutoff is chosen only from other dates' control flights under a budget of
+25 suppressed false alerts per 1,000 observed control hours. This is a research
+pilot, not the live detection threshold.
+
+The pilot detected **1 of 38** declaration events 244 seconds early, with
+**7 false alerts in 172.9 control hours** (40.5 per 1,000 hours). Its gate was
+at least 3 events on at least 2 aircraft and at most 4 false alerts. It failed,
+so the stateful score was not connected to the live warning path. The full
+result is written to
+`data/learning/ten_day_development/temporal_risk_pilot/pilot_2025-08-15.json`.
+These development data cannot establish future-date warning performance.
