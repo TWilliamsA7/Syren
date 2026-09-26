@@ -5,5 +5,4 @@ narwhals==2.26.0
 numpy==2.2.6
 scikit-learn==1.7.2
 scipy==1.15.3
-torch==2.14.0
 threadpoolctl==3.7.0

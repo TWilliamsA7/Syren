@@ -1,68 +1,44 @@
-"""Compare one compact causal CNN with the fixed temporal HGB baseline."""
+"""Evaluate a control-only Isolation Forest against the fixed temporal HGB baseline."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
-import random
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import joblib
 import scipy
 import sklearn
-import torch
 from scipy.stats import chi2
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import average_precision_score, roc_auc_score
-from torch import nn
 
 from ml.compare_models import fit_predict as fit_tree
 from ml.features import TEMPORAL_FEATURE_NAMES
-from ml.label_windows import DEFAULT_OUTPUT, EPISODE_TARGET, SUPPORTED_SUBTYPE_HEADS
-from ml.sequence_features import (
-    CHANNEL_NAMES, NORMALIZED_VALUE_CHANNELS, STEPS, VALUE_MASK_CHANNEL,
-)
+from ml.label_windows import DEFAULT_OUTPUT, EPISODE_TARGET
 
 SEED = 17
-CNN_CONFIG = {
-    "architecture": f"Conv1d({len(CHANNEL_NAMES)},16,kernel=3)-ReLU-Conv1d(16,32,kernel=3)-ReLU-global-average-pool-dropout-Linear({1 + len(SUPPORTED_SUBTYPE_HEADS)})",
-    "epochs": 20,
-    "batch_size": 2048,
-    "learning_rate": 0.001,
-    "weight_decay": 0.0001,
-    "dropout": 0.15,
-    "seed": SEED,
-    "fold_seed_policy": "base seed plus zero-based fold index; final all-date fit uses base seed",
-    "loss_weighting": "aircraft-day-balanced, class-balanced",
-    "output_heads": ["any_declaration", *SUPPORTED_SUBTYPE_HEADS],
-}
 TREE_CONFIG = {
     "features": "temporal", "weighting": "group_balanced",
     "model": "hist_gradient_boosting", "max_leaf_nodes": 3,
     "max_iter": 100,
 }
+ISOLATION_FOREST_CONFIG = {
+    "model": "isolation_forest",
+    "training_cohort": "control_sample only",
+    "max_windows_per_aircraft_day": 4,
+    "n_estimators": 200,
+    "max_samples": 256,
+    "contamination": "auto",
+    "max_features": 1.0,
+    "bootstrap": False,
+}
 CURVE_POINTS = 201
-
-
-class CompactSequenceCNN(nn.Module):
-    def __init__(self, dropout: float = 0.15) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv1d(len(CHANNEL_NAMES), 16, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(16, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),
-            nn.Flatten(),
-            nn.Dropout(dropout),
-            nn.Linear(32, 1 + len(SUPPORTED_SUBTYPE_HEADS)),
-        )
-
-    def forward(self, values: torch.Tensor) -> torch.Tensor:
-        return self.features(values)
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
@@ -72,13 +48,13 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             row = json.loads(line)
-            if row.get("target") != EPISODE_TARGET or row.get("sequence_schema_version") != 2:
-                raise ValueError(f"Target or sequence schema mismatch at {path}:{line_no}")
-            sequence = np.asarray(row.get("sequence"), dtype=float)
-            if sequence.shape != (STEPS, len(CHANNEL_NAMES)) or not np.isfinite(sequence).all():
-                raise ValueError(f"Invalid sequence at {path}:{line_no}: {sequence.shape}")
+            if row.get("target") != EPISODE_TARGET:
+                raise ValueError(f"Target mismatch at {path}:{line_no}")
             if not isinstance(row.get("targets"), dict) or not isinstance(row.get("future_events"), list):
                 raise ValueError(f"Missing multi-label targets or episode metadata at {path}:{line_no}")
+            # The primary tabular predictor and its tree reference use only
+            # temporal_features; avoid retaining the much larger sequence field.
+            row.pop("sequence", None)
             rows.append(row)
     if not rows:
         raise ValueError("No labeled rows found")
@@ -99,122 +75,78 @@ def purged_date_split(rows: list[dict[str, Any]], validation_date: str) -> tuple
     return train, validation, all_other_aircraft & validation_aircraft
 
 
-def sequence_matrix(rows: list[dict[str, Any]]) -> np.ndarray:
-    return np.asarray([row["sequence"] for row in rows], dtype=np.float32)
-
-
-def fit_normalizer(train_x: np.ndarray) -> dict[str, list[float]]:
-    """Fit value-channel statistics using observed training-fold cells only."""
-    means: list[float] = []
-    scales: list[float] = []
-    for channel in NORMALIZED_VALUE_CHANNELS:
-        mask_channel = VALUE_MASK_CHANNEL[channel]
-        observed = train_x[:, :, mask_channel] > 0.5
-        values = train_x[:, :, channel][observed]
-        if not len(values):
-            mean, scale = 0.0, 1.0
-        else:
-            mean = float(values.mean())
-            scale = float(values.std())
-            if not math.isfinite(scale) or scale < 1e-6:
-                scale = 1.0
-        means.append(mean)
-        scales.append(scale)
-    return {"channels": list(NORMALIZED_VALUE_CHANNELS), "mean": means, "scale": scales}
-
-
-def normalize_sequences(values: np.ndarray, normalizer: dict[str, list[float]]) -> np.ndarray:
-    result = np.asarray(values, dtype=np.float32).copy()
-    for position, channel in enumerate(normalizer["channels"]):
-        mask_channel = VALUE_MASK_CHANNEL[channel]
-        valid = result[:, :, mask_channel] > 0.5
-        transformed = (result[:, :, channel] - normalizer["mean"][position]) / normalizer["scale"][position]
-        result[:, :, channel] = np.where(valid, transformed, 0.0)
-    return result
-
-
-def seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
 def target_labels(rows: list[dict[str, Any]], head: str) -> np.ndarray:
     return np.asarray([int(row["targets"][head]) for row in rows], dtype=np.float32)
 
 
-def balanced_target_weights(rows: list[dict[str, Any]], labels: np.ndarray) -> np.ndarray | None:
-    """Balance labels and aircraft-days for one output, if both classes occur."""
-    group_counts: Counter[tuple[str, str, int]] = Counter(
-        (row["date_utc"], row["icao24"], int(label)) for row, label in zip(rows, labels)
+def temporal_feature_matrix(rows: list[dict[str, Any]]) -> np.ndarray:
+    matrix = []
+    for index, row in enumerate(rows):
+        features = row.get("temporal_features")
+        if not isinstance(features, dict) or tuple(features) != TEMPORAL_FEATURE_NAMES:
+            raise ValueError(f"Temporal feature schema mismatch at row {index}")
+        values = []
+        for name in TEMPORAL_FEATURE_NAMES:
+            value = features[name]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"Feature {name} must be finite numeric at row {index}")
+            values.append(float(value))
+        matrix.append(values)
+    return np.asarray(matrix, dtype=float)
+
+
+def balanced_control_sample(
+    rows: list[dict[str, Any]], max_windows_per_aircraft_day: int = 4,
+) -> list[dict[str, Any]]:
+    """Keep up to four evenly spaced negative control windows per aircraft-day."""
+    if max_windows_per_aircraft_day < 1:
+        raise ValueError("max_windows_per_aircraft_day must be positive")
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("source_cohort") != "control_sample":
+            raise ValueError("Isolation Forest may train only on control_sample rows")
+        if int(row.get("targets", {}).get("any_declaration", -1)) != 0:
+            raise ValueError("Control rows must have no future declaration label")
+        key = (str(row["date_utc"]), str(row["icao24"]))
+        groups.setdefault(key, []).append(row)
+
+    selected = []
+    for key in sorted(groups):
+        group = sorted(groups[key], key=lambda row: float(row["anchor_unix_s"]))
+        if len(group) > max_windows_per_aircraft_day:
+            indices = np.linspace(
+                0, len(group) - 1, max_windows_per_aircraft_day, dtype=int,
+            )
+            group = [group[index] for index in indices]
+        selected.extend(group)
+    if len(selected) < 2:
+        raise ValueError("Isolation Forest needs at least two sampled control windows")
+    return selected
+
+
+def fit_isolation_forest(
+    training_rows: list[dict[str, Any]], seed: int = SEED,
+) -> tuple[IsolationForest, list[dict[str, Any]]]:
+    controls = [row for row in training_rows if row.get("source_cohort") == "control_sample"]
+    sampled = balanced_control_sample(controls, ISOLATION_FOREST_CONFIG["max_windows_per_aircraft_day"])
+    model = IsolationForest(
+        n_estimators=ISOLATION_FOREST_CONFIG["n_estimators"],
+        max_samples=min(ISOLATION_FOREST_CONFIG["max_samples"], len(sampled)),
+        contamination=ISOLATION_FOREST_CONFIG["contamination"],
+        max_features=ISOLATION_FOREST_CONFIG["max_features"],
+        bootstrap=ISOLATION_FOREST_CONFIG["bootstrap"],
+        random_state=seed,
+        n_jobs=-1,
     )
-    class_groups = Counter(label for _, _, label in group_counts)
-    if set(class_groups) != {0, 1}:
-        return None
-    weights = np.asarray([
-        1.0 / (group_counts[(row["date_utc"], row["icao24"], int(label))] * class_groups[int(label)])
-        for row, label in zip(rows, labels)
-    ], dtype=np.float32)
-    weights *= len(rows) / weights.sum()
-    return weights
+    model.fit(temporal_feature_matrix(sampled))
+    return model, sampled
 
 
-def train_cnn(
-    rows: list[dict[str, Any]], seed: int = SEED,
-) -> tuple[CompactSequenceCNN, dict[str, list[float]], list[str]]:
-    if {int(row["targets"]["any_declaration"]) for row in rows} != {0, 1}:
-        raise ValueError("CNN training split requires both any-declaration labels")
-    seed_everything(seed)
-    torch.set_num_threads(max(1, min(torch.get_num_threads(), 4)))
-    raw = sequence_matrix(rows)
-    normalizer = fit_normalizer(raw)
-    x = torch.from_numpy(normalize_sequences(raw, normalizer).transpose(0, 2, 1).copy())
-    heads = ["any_declaration", *SUPPORTED_SUBTYPE_HEADS]
-    y_np = np.column_stack([target_labels(rows, head) for head in heads])
-    y = torch.from_numpy(y_np)
-    per_head_weights = [balanced_target_weights(rows, y_np[:, index]) for index in range(len(heads))]
-    supported_heads = [head for head, weights in zip(heads, per_head_weights) if weights is not None]
-    weight_tensor = torch.from_numpy(np.column_stack([
-        weights if weights is not None else np.zeros(len(rows), dtype=np.float32)
-        for weights in per_head_weights
-    ]))
-    active = torch.tensor([weights is not None for weights in per_head_weights], dtype=torch.bool)
-    model = CompactSequenceCNN(CNN_CONFIG["dropout"])
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=CNN_CONFIG["learning_rate"],
-        weight_decay=CNN_CONFIG["weight_decay"],
-    )
-    batch_size = CNN_CONFIG["batch_size"]
-    model.train()
-    for _ in range(CNN_CONFIG["epochs"]):
-        order = torch.randperm(len(rows))
-        for start in range(0, len(rows), batch_size):
-            indices = order[start:start + batch_size]
-            logits = model(x[indices])
-            losses = nn.functional.binary_cross_entropy_with_logits(logits, y[indices], reduction="none")
-            batch_weights = weight_tensor[indices]
-            per_head = (losses * batch_weights).sum(dim=0) / batch_weights.sum(dim=0).clamp_min(1e-8)
-            loss = per_head[active].mean()
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-    return model.eval(), normalizer, supported_heads
-
-
-@torch.no_grad()
-def predict_cnn(
-    model: CompactSequenceCNN, rows: list[dict[str, Any]],
-    normalizer: dict[str, list[float]], batch_size: int = 2048,
-) -> np.ndarray:
-    raw = sequence_matrix(rows)
-    values = torch.from_numpy(normalize_sequences(raw, normalizer).transpose(0, 2, 1).copy())
-    model.eval()
-    return np.concatenate([
-        torch.sigmoid(model(values[start:start + batch_size])).cpu().numpy()
-        for start in range(0, len(rows), batch_size)
-    ], axis=0)
+def isolation_anomaly_scores(model: IsolationForest, rows: list[dict[str, Any]]) -> np.ndarray:
+    """Return larger scores for more anomalous windows; these are not probabilities."""
+    if not rows:
+        return np.asarray([], dtype=float)
+    return -model.decision_function(temporal_feature_matrix(rows))
 
 
 def wilson(successes: int, trials: int) -> list[float] | None:
@@ -237,10 +169,13 @@ def poisson_rate_interval(count: int, hours: float) -> list[float] | None:
 
 
 def curve_thresholds(scores: list[float]) -> list[float]:
-    # A dense fixed score-domain grid makes every part of the empirical tradeoff
-    # visible without choosing an operating point from these development scores.
-    return sorted(set(np.linspace(0.0, 1.0, CURVE_POINTS).tolist()
-                      + [math.nextafter(max(scores), math.inf)]))
+    # Cover the model's full score range (Isolation Forest scores are not bounded
+    # to [0, 1]) and include a distinct no-alert point.
+    if not scores:
+        return [0.0]
+    low, high = min(scores), max(scores)
+    grid = np.linspace(low, high, CURVE_POINTS).tolist() if low != high else [low]
+    return sorted(set(grid + [math.nextafter(high, math.inf)]))
 
 
 def episode_catalog(rows: list[dict[str, Any]], head: str = "any_declaration") -> dict[str, dict[str, Any]]:
@@ -385,8 +320,8 @@ def audit_context(dataset: Path) -> dict[str, Any]:
 def write_curve_svg(report: dict[str, Any], path: Path) -> None:
     """Write a dependency-free pooled event-recall/false-alert plot."""
     series = (
+        ("isolation_forest", "Isolation Forest anomaly score", "#c026d3"),
         ("temporal_boosted_tree_baseline", "Temporal boosted tree", "#2563eb"),
-        ("compact_sequence_cnn", "Compact sequence CNN", "#c026d3"),
     )
     curves = [report[name]["recall_vs_false_alert_curve"] for name, _, _ in series]
     xmax = max(float(point["control_false_alerts_per_1000_hours"] or 0.0)
@@ -407,7 +342,7 @@ def write_curve_svg(report: dict[str, Any], path: Path) -> None:
     elements = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#ffffff"/>',
-        '<text x="100" y="34" font-family="Segoe UI,Arial,sans-serif" font-size="23" font-weight="600" fill="#111827">Event recall vs false alerts</text>',
+        '<text x="100" y="34" font-family="Segoe UI,Arial,sans-serif" font-size="23" font-weight="600" fill="#111827">Isolation Forest vs temporal baseline</text>',
         '<text x="100" y="60" font-family="Segoe UI,Arial,sans-serif" font-size="14" fill="#4b5563">Ten-date out-of-fold development comparison · ADS-B declaration proxy · no threshold selected</text>',
     ]
     for tick in ticks:
@@ -476,31 +411,157 @@ def summarize_curves(
     return curve, per_date
 
 
-def compare(dataset: Path, output_dir: Path, development_dates: tuple[str, ...] | None = None) -> dict[str, Any]:
+def best_recall_at_false_alert_limit(curve: list[dict[str, Any]], limit: float) -> dict[str, Any]:
+    eligible = [point for point in curve
+                if point["control_false_alerts_per_1000_hours"] is not None
+                and point["control_false_alerts_per_1000_hours"] <= limit]
+    if not eligible:
+        return {"false_alert_limit_per_1000_hours": limit, "event_recall": None}
+    best = max(eligible, key=lambda point: (
+        float(point["event_recall"] or 0.0),
+        -float(point["control_false_alerts_per_1000_hours"] or 0.0),
+    ))
+    return {
+        "false_alert_limit_per_1000_hours": limit,
+        "event_recall": best["event_recall"],
+        "false_alerts_per_1000_hours": best["control_false_alerts_per_1000_hours"],
+        "detected_events": best["detected_events"],
+        "event_count": best["event_count"],
+        "warning_time_median_seconds": best["warning_time_median_seconds"],
+        "warning_time_p10_seconds": best["warning_time_p10_seconds"],
+    }
+
+
+def describe_tradeoff_at_limit(
+    isolation_forest: dict[str, Any], baseline: dict[str, Any],
+) -> dict[str, Any]:
+    limit = float(isolation_forest["false_alert_limit_per_1000_hours"])
+    alert_word = "alert" if limit == 1 else "alerts"
+    forest_recall = isolation_forest.get("event_recall")
+    baseline_recall = baseline.get("event_recall")
+    if forest_recall is None or baseline_recall is None:
+        status = "not_comparable"
+        summary = "Event recall could not be compared at this descriptive false-alert limit."
+    elif forest_recall == baseline_recall == 0:
+        status = "neither_detects_events"
+        events = int(isolation_forest.get("event_count", 0))
+        summary = (
+            f"At the descriptive cap of no more than {limit:g} false {alert_word} per 1,000 control-flight hours, "
+            f"neither model detected any of the {events} out-of-fold declaration episodes. "
+            "Isolation Forest did not improve event recall at this budget. Secondary window-level ROC AUC and "
+            "average precision are reported separately and do not establish event-level utility at this cap. "
+            "All ten dates are development data."
+        )
+    elif forest_recall == baseline_recall:
+        status = "equal_event_recall"
+        summary = (
+            f"At the descriptive cap of no more than {limit:g} false {alert_word} per 1,000 control-flight hours, "
+            f"both models reached event recall {forest_recall:.4f}; Isolation Forest did not improve recall. "
+            "All ten dates are development data."
+        )
+    elif forest_recall > baseline_recall:
+        status = "isolation_forest_higher_recall"
+        summary = (
+            f"At the descriptive cap of no more than {limit:g} false {alert_word} per 1,000 control-flight hours, "
+            f"Isolation Forest reached event recall {forest_recall:.4f} versus {baseline_recall:.4f} for the "
+            "baseline. This is a development-only comparison across the ten available dates."
+        )
+    else:
+        status = "baseline_higher_recall"
+        summary = (
+            f"At the descriptive cap of no more than {limit:g} false {alert_word} per 1,000 control-flight hours, "
+            f"Isolation Forest reached event recall {forest_recall:.4f} versus {baseline_recall:.4f} for the "
+            "baseline. This is a development-only comparison across the ten available dates."
+        )
+    return {
+        "status": status,
+        "false_alert_limit_per_1000_control_flight_hours": limit,
+        "summary": summary,
+    }
+
+
+def load_cached_oof_scores(
+    rows: list[dict[str, Any]], output_dir: Path,
+) -> dict[str, dict[str, float]]:
+    """Load and validate complete OOF scores so final reporting can be resumed."""
+    row_by_id = {row["example_id"]: row for row in rows}
+    if len(row_by_id) != len(rows):
+        raise ValueError("Dataset example_id values must be unique to reuse OOF predictions")
+    score_types = {
+        "isolation_forest": "isolation_anomaly_score",
+        "temporal_boosted_tree_baseline": "ranking_score",
+    }
+    cached: dict[str, dict[str, float]] = {}
+    for name, expected_type in score_types.items():
+        path = output_dir / f"{name}_oof_predictions.jsonl"
+        if not path.is_file():
+            raise ValueError(f"Cannot reuse OOF predictions; missing {path}")
+        values: dict[str, float] = {}
+        with path.open(encoding="utf-8") as stream:
+            for line_no, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                example_id = record.get("example_id")
+                row = row_by_id.get(example_id)
+                if row is None or example_id in values:
+                    raise ValueError(f"Unexpected or duplicate example_id in {path}:{line_no}")
+                score = record.get("score")
+                if (record.get("score_type") != expected_type
+                        or isinstance(score, bool)
+                        or not isinstance(score, (int, float))
+                        or not math.isfinite(score)):
+                    raise ValueError(f"Invalid score or score type in {path}:{line_no}")
+                if record.get("targets") != row.get("targets"):
+                    raise ValueError(f"Cached OOF labels disagree with dataset at {path}:{line_no}")
+                values[example_id] = float(score)
+        if set(values) != set(row_by_id):
+            raise ValueError(f"Cached OOF file {path} does not cover the dataset exactly once")
+        cached[name] = values
+    return cached
+
+
+def compare(
+    dataset: Path,
+    output_dir: Path,
+    development_dates: tuple[str, ...] | None = None,
+    reuse_oof_predictions: bool = False,
+) -> dict[str, Any]:
     rows = load_rows(dataset)
     observed_dates = sorted({row["date_utc"] for row in rows})
     dates = sorted(set(development_dates)) if development_dates else observed_dates
     if set(dates) != set(observed_dates) or len(dates) != 10:
         raise ValueError(f"Expected all ten development dates; observed={observed_dates}, requested={dates}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    cached_scores = load_cached_oof_scores(rows, output_dir) if reuse_oof_predictions else None
     oof: dict[str, dict[str, Any]] = {
-        "temporal_hgb": {"rows": [], "scores": [], "folds": []},
-        "sequence_cnn": {
-            "rows": [], "scores": [], "folds": [],
-            "head_scores": {head: [] for head in ["any_declaration", *SUPPORTED_SUBTYPE_HEADS]},
-        },
+        "isolation_forest": {"rows": [], "scores": [], "folds": [], "score_type": "isolation_anomaly_score"},
+        "temporal_boosted_tree_baseline": {"rows": [], "scores": [], "folds": [], "score_type": "ranking_score"},
     }
     fold_counts = []
     for fold_number, validation_date in enumerate(dates, 1):
         train, validation, purged = purged_date_split(rows, validation_date)
         if {row["label"] for row in train} != {0, 1}:
             raise ValueError(f"Training fold {validation_date} lacks both labels")
-        print(f"Fold {fold_number}/10 {validation_date}: train={len(train)} validation={len(validation)} purged_aircraft={len(purged)}", flush=True)
-        _, tree_scores = fit_tree(train, validation, TREE_CONFIG)
-        cnn, normalizer, supported_heads = train_cnn(train, SEED + fold_number - 1)
-        cnn_matrix = predict_cnn(cnn, validation, normalizer)
+        seed = SEED + fold_number - 1
+        print(
+            f"Fold {fold_number}/10 {validation_date}: train={len(train)} "
+            f"validation={len(validation)} purged_aircraft={len(purged)}", flush=True,
+        )
+        if cached_scores is None:
+            _, tree_scores = fit_tree(train, validation, TREE_CONFIG)
+            forest, normal_rows = fit_isolation_forest(train, seed)
+            forest_scores = isolation_anomaly_scores(forest, validation)
+        else:
+            tree_scores = [cached_scores["temporal_boosted_tree_baseline"][row["example_id"]]
+                           for row in validation]
+            forest_scores = np.asarray([
+                cached_scores["isolation_forest"][row["example_id"]] for row in validation
+            ], dtype=float)
+            normal_rows = balanced_control_sample([
+                row for row in train if row.get("source_cohort") == "control_sample"
+            ])
         y_val = target_labels(validation, "any_declaration").astype(int).tolist()
-        any_scores = [float(value) for value in cnn_matrix[:, 0]]
         validation_events = len(episode_catalog(validation))
         shared_fold = {
             "validation_date": validation_date,
@@ -512,42 +573,34 @@ def compare(dataset: Path, output_dir: Path, development_dates: tuple[str, ...] 
             "validation_windows": len(validation),
             "validation_positive_windows": sum(y_val),
             "validation_events": validation_events,
-            "training_seed": SEED + fold_number - 1,
+            "training_seed": seed,
         }
-        tree_score_list = [float(value) for value in tree_scores]
-        oof["temporal_hgb"]["rows"].extend(validation)
-        oof["temporal_hgb"]["scores"].extend(tree_score_list)
-        oof["temporal_hgb"]["folds"].append({
-            **shared_fold,
-            "validation_roc_auc": float(roc_auc_score(y_val, tree_score_list)) if len(set(y_val)) == 2 else None,
-            "validation_average_precision": float(average_precision_score(y_val, tree_score_list)) if sum(y_val) else None,
+        for name, scores in (
+            ("temporal_boosted_tree_baseline", np.asarray(tree_scores, dtype=float)),
+            ("isolation_forest", forest_scores),
+        ):
+            score_list = [float(value) for value in scores]
+            oof[name]["rows"].extend(validation)
+            oof[name]["scores"].extend(score_list)
+            fold = dict(shared_fold)
+            if name == "isolation_forest":
+                fold["normal_training_windows"] = len(normal_rows)
+                fold["normal_training_aircraft_days"] = len({
+                    (row["date_utc"], row["icao24"]) for row in normal_rows
+                })
+                fold["normal_training_cohort"] = "control_sample"
+            fold["validation_roc_auc"] = (
+                float(roc_auc_score(y_val, score_list)) if len(set(y_val)) == 2 else None
+            )
+            fold["validation_average_precision"] = (
+                float(average_precision_score(y_val, score_list)) if sum(y_val) else None
+            )
+            oof[name]["folds"].append(fold)
+        fold_counts.append({
+            "validation_date": validation_date,
+            "purged_aircraft_ids": len(purged),
+            "isolation_forest_normal_training_windows": len(normal_rows),
         })
-
-        cnn_fold_heads = {}
-        all_heads = ["any_declaration", *SUPPORTED_SUBTYPE_HEADS]
-        for column, head in enumerate(all_heads):
-            head_scores = [float(value) for value in cnn_matrix[:, column]]
-            head_y = target_labels(validation, head).astype(int).tolist()
-            head_events = len(episode_catalog(validation, head))
-            cnn_fold_heads[head] = {
-                "validation_positive_windows": sum(head_y),
-                "validation_events": head_events,
-                "trained_in_fold": head in supported_heads,
-                "validation_roc_auc": float(roc_auc_score(head_y, head_scores)) if len(set(head_y)) == 2 else None,
-                "validation_average_precision": float(average_precision_score(head_y, head_scores)) if sum(head_y) else None,
-            }
-            oof["sequence_cnn"]["head_scores"][head].extend(head_scores)
-        oof["sequence_cnn"]["rows"].extend(validation)
-        oof["sequence_cnn"]["scores"].extend(any_scores)
-        oof["sequence_cnn"]["folds"].append({
-            **shared_fold,
-            "validation_roc_auc": cnn_fold_heads["any_declaration"]["validation_roc_auc"],
-            "validation_average_precision": cnn_fold_heads["any_declaration"]["validation_average_precision"],
-            "training_normalizer": normalizer,
-            "supported_training_heads": supported_heads,
-            "head_scores": cnn_fold_heads,
-        })
-        fold_counts.append({"validation_date": validation_date, "purged_aircraft_ids": len(purged)})
 
     model_reports: dict[str, Any] = {}
     prediction_paths: dict[str, str] = {}
@@ -556,13 +609,13 @@ def compare(dataset: Path, output_dir: Path, development_dates: tuple[str, ...] 
         scores = values["scores"]
         labels = target_labels(model_rows, "any_declaration").astype(int).tolist()
         curve, per_date = summarize_curves(model_rows, scores, "any_declaration")
-        y_mean = float(np.mean(labels))
         model_reports[name] = {
-            "configuration": TREE_CONFIG if name == "temporal_hgb" else CNN_CONFIG,
+            "score_type": values["score_type"],
+            "configuration": ISOLATION_FOREST_CONFIG if name == "isolation_forest" else TREE_CONFIG,
             "folds": values["folds"],
             "oof_windows": len(model_rows),
             "oof_events": len(episode_catalog(model_rows)),
-            "oof_positive_fraction": y_mean,
+            "oof_positive_fraction": float(np.mean(labels)),
             "oof_roc_auc_secondary": float(roc_auc_score(labels, scores)) if len(set(labels)) == 2 else None,
             "oof_average_precision_secondary": float(average_precision_score(labels, scores)) if sum(labels) else None,
             "event_signal_subtype_counts": event_subtype_counts(model_rows),
@@ -575,91 +628,99 @@ def compare(dataset: Path, output_dir: Path, development_dates: tuple[str, ...] 
         }
         path = output_dir / f"{name}_oof_predictions.jsonl"
         with path.open("w", encoding="utf-8", newline="\n") as stream:
-            for index, (row, score) in enumerate(zip(model_rows, scores)):
-                prediction = {
+            for row, score in zip(model_rows, scores):
+                stream.write(json.dumps({
                     "example_id": row["example_id"], "date_utc": row["date_utc"],
                     "icao24": row["icao24"], "group_id": row["group_id"],
                     "anchor_unix_s": row["anchor_unix_s"],
                     "label": row["targets"]["any_declaration"], "targets": row["targets"],
                     "future_events": row["future_events"], "source_cohort": row["source_cohort"],
                     "airborne_exposure_seconds": row["airborne_exposure_seconds"],
-                    "score": score,
-                }
-                if name == "sequence_cnn":
-                    prediction["head_scores"] = {
-                        head: values[index] for head, values in oof[name]["head_scores"].items()
-                    }
-                stream.write(json.dumps({
-                    **prediction,
+                    "score_type": values["score_type"], "score": score,
                 }, separators=(",", ":")) + "\n")
         prediction_paths[name] = str(path.resolve())
 
-    subtype_reports = {}
-    for head, scores in oof["sequence_cnn"]["head_scores"].items():
-        head_curve, head_per_date = summarize_curves(oof["sequence_cnn"]["rows"], scores, head)
-        head_labels = target_labels(oof["sequence_cnn"]["rows"], head).astype(int).tolist()
-        subtype_reports[head] = {
-            "oof_positive_windows": sum(head_labels),
-            "oof_events": len(episode_catalog(oof["sequence_cnn"]["rows"], head)),
-            "oof_roc_auc_secondary": float(roc_auc_score(head_labels, scores)) if len(set(head_labels)) == 2 else None,
-            "oof_average_precision_secondary": float(average_precision_score(head_labels, scores)) if sum(head_labels) else None,
-            "recall_vs_false_alert_curve": head_curve,
-            "per_date_results": head_per_date,
-        }
-    model_reports["sequence_cnn"]["subtype_heads"] = subtype_reports
+    bundle_training_rows = [row for row in rows if row.get("source_cohort") == "control_sample"]
+    research_model, final_normal_rows = fit_isolation_forest(bundle_training_rows, SEED)
+    bundle_path = output_dir / "isolation_forest_research_bundle.joblib"
+    bundle = {
+        "schema_version": 1,
+        "model_type": "isolation_forest",
+        "target": EPISODE_TARGET,
+        "score_type": "isolation_anomaly_score",
+        "score_direction": "higher means more unusual relative to sampled control-flight windows",
+        "feature_field": "temporal_features",
+        "feature_names": list(TEMPORAL_FEATURE_NAMES),
+        "model": research_model,
+        "training": {
+            "dates": dates,
+            "configuration": ISOLATION_FOREST_CONFIG,
+            "training_cohort": "control_sample",
+            "training_windows": len(final_normal_rows),
+            "training_aircraft_days": len({
+                (row["date_utc"], row["icao24"]) for row in final_normal_rows
+            }),
+            "python_version": __import__("platform").python_version(),
+            "numpy_version": str(np.__version__),
+            "scikit_learn_version": sklearn.__version__,
+            "scipy_version": scipy.__version__,
+        },
+        "warning": (
+            "Research-only model trained on all ten development dates. Its score is not an emergency probability; "
+            "no untouched final test date or operational threshold is available."
+        ),
+    }
+    joblib.dump(bundle, bundle_path)
 
-    # Refit the fixed CNN on all development dates for an isolated research bundle.
-    research_model, research_normalizer, research_supported_heads = train_cnn(rows, SEED)
-    bundle_path = output_dir / "sequence_cnn_research_bundle.pt"
-    torch.save({
+    comparison_cap = 1.0
+    forest_at_cap = best_recall_at_false_alert_limit(
+        model_reports["isolation_forest"]["recall_vs_false_alert_curve"], comparison_cap,
+    )
+    tree_at_cap = best_recall_at_false_alert_limit(
+        model_reports["temporal_boosted_tree_baseline"]["recall_vs_false_alert_curve"], comparison_cap,
+    )
+    recall_delta = (
+        float(forest_at_cap["event_recall"]) - float(tree_at_cap["event_recall"])
+        if forest_at_cap["event_recall"] is not None and tree_at_cap["event_recall"] is not None
+        else None
+    )
+    report = {
         "schema_version": 2,
         "target": EPISODE_TARGET,
-        "output_heads": ["any_declaration", *SUPPORTED_SUBTYPE_HEADS],
-        "architecture": CNN_CONFIG["architecture"],
-        "model_state_dict": research_model.state_dict(),
-        "preprocessing": {
-            "channel_names": list(CHANNEL_NAMES),
-            "normalizer": research_normalizer,
-            "sequence_steps": STEPS,
-            "interval_seconds": 10,
-            "history_seconds": 300,
-            "max_interpolation_gap_seconds": 30,
-            "track_representation": "sin_cos of shortest-arc interpolation",
-            "missing_representation": "zero-filled after fold training normalization plus explicit masks",
-            "position_representation": "causal anchor-relative local east/north offsets in nautical miles; absolute coordinates are not inputs",
-        },
-        "training": {
-            "dates": dates, "configuration": CNN_CONFIG,
-            "supported_heads": research_supported_heads,
-            "training_aircraft_days": len({(row["date_utc"], row["icao24"]) for row in rows}),
-            "training_windows": len(rows),
-            "python_version": __import__("platform").python_version(),
-            "torch_version": str(torch.__version__), "numpy_version": str(np.__version__),
-            "scikit_learn_version": sklearn.__version__, "scipy_version": scipy.__version__,
-        },
-        "warning": "Research-only bundle trained and compared on all ten development dates. Not connected to deployed inference. No untouched test date.",
-    }, bundle_path)
-
-    report = {
-        "schema_version": 1,
-        "target": EPISODE_TARGET,
+        "primary_model": "isolation_forest",
         "evaluation": "ten-date leave-one-date-out with aircraft-ID purging; all ten dates are development data",
         "development_dates": dates,
         "alert_curve_grid": {
-            "kind": "uniform score-domain grid",
+            "kind": "uniform per-model observed score range plus no-alert point",
             "base_points": CURVE_POINTS,
-            "step": 1.0 / (CURVE_POINTS - 1),
             "extra_threshold": "immediately above the maximum model score (no-alert point)",
         },
         "no_untouched_final_test_date": True,
         "fold_separation": fold_counts,
         "candidate_audit_and_coverage": audit_context(dataset),
-        "temporal_boosted_tree_baseline": model_reports["temporal_hgb"],
-        "compact_sequence_cnn": model_reports["sequence_cnn"],
+        "isolation_forest": model_reports["isolation_forest"],
+        "temporal_boosted_tree_baseline": model_reports["temporal_boosted_tree_baseline"],
+        "development_tradeoff_at_1_false_alert_per_1000_control_hours": {
+            "descriptive_only": True,
+            "isolation_forest": forest_at_cap,
+            "temporal_boosted_tree_baseline": tree_at_cap,
+            "event_recall_difference": recall_delta,
+        },
+        "tradeoff_assessment": describe_tradeoff_at_limit(forest_at_cap, tree_at_cap),
         "model_bundle": str(bundle_path.resolve()),
         "oof_prediction_files": prediction_paths,
-        "selection": "No operational model or threshold selected from these development scores. Compare event-level tradeoffs across dates; AUC is secondary.",
-        "signal_policy": "ADS-B declaration proxies grouped into 60-second multi-label episodes. The CNN predicts any declaration plus four common subtype heads; rarer subtype labels remain audit/evaluation metadata. No signal or subtype value is an input feature.",
+        "selection": (
+            "Isolation Forest is the primary research predictor. Development curves and the fixed-budget "
+            "summary are descriptive; no operational model threshold is selected."
+        ),
+        "score_warning": (
+            "Isolation Forest outputs an anomaly score, not a calibrated probability of emergency declaration. "
+            "Its predictive value is determined only by the held-out declaration evaluation."
+        ),
+        "signal_policy": (
+            "ADS-B declaration proxies grouped into 60-second multi-label episodes. The Isolation Forest is fit "
+            "only on sampled control-flight windows; signal values and labels are not model inputs."
+        ),
         "warning": "Exploratory development comparison only. A future alerting claim requires new dates collected after model and threshold are frozen.",
     }
     (output_dir / "temporal_model_comparison.json").write_text(
@@ -677,9 +738,18 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, default=DEFAULT_OUTPUT / "declaration_episode_windows.jsonl")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT / "temporal_episode_comparison")
     parser.add_argument("--development-dates", nargs="+", default=None)
+    parser.add_argument(
+        "--reuse-oof-predictions", action="store_true",
+        help="rebuild the report and artifact from complete saved OOF prediction files",
+    )
     args = parser.parse_args()
     try:
-        result = compare(args.dataset, args.output_dir, tuple(args.development_dates) if args.development_dates else None)
+        result = compare(
+            args.dataset,
+            args.output_dir,
+            tuple(args.development_dates) if args.development_dates else None,
+            reuse_oof_predictions=args.reuse_oof_predictions,
+        )
     except (OSError, ValueError, RuntimeError, KeyError) as exc:
         parser.error(str(exc))
         return 2

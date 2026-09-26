@@ -1,10 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-import numpy as np
-import torch
-
-from ml.compare_temporal_models import CompactSequenceCNN, purged_date_split
+from ml.compare_temporal_models import purged_date_split
 from ml.label_windows import build_signal_episodes, labeled_rows
 from ml.sequence_features import resample_sequence
 
@@ -100,16 +97,6 @@ class SequenceFeatureTests(unittest.TestCase):
         self.assertEqual(by_anchor[300.0]["targets"]["emergency_squawk:7700"], 1)
         self.assertEqual([event["event_id"] for event in by_anchor[300.0]["future_events"]], ["one", "two"])
         self.assertNotIn(480.0, by_anchor)  # 120 seconds before event one is intentionally unlabeled.
-
-    def test_multitask_cnn_has_one_broad_and_four_subtype_outputs(self):
-        model = CompactSequenceCNN(dropout=0.0)
-        batch = torch.zeros((2, 14, 31), dtype=torch.float32)
-        logits = model(batch)
-        self.assertEqual(tuple(logits.shape), (2, 5))
-        labels = torch.zeros_like(logits)
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels)
-        loss.backward()
-        self.assertTrue(np.isfinite(float(loss.detach())))
 
     def test_fold_purges_aircraft_shared_with_validation_date(self):
         rows = [

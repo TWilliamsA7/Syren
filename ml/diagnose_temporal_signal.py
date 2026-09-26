@@ -13,7 +13,8 @@ import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 from ml.compare_temporal_models import (
-    SEED, TREE_CONFIG, load_rows, predict_cnn, purged_date_split, train_cnn,
+    SEED, TREE_CONFIG, fit_isolation_forest, isolation_anomaly_scores,
+    load_rows, purged_date_split,
 )
 from ml.compare_models import fit_predict
 from ml.features import TEMPORAL_FEATURE_NAMES
@@ -47,19 +48,18 @@ def _distribution(values: list[float]) -> dict[str, float | None]:
 
 def _prediction_diagnostics(prediction_dir: Path) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for model in ("temporal_hgb", "sequence_cnn"):
+    for model in ("temporal_boosted_tree_baseline", "isolation_forest"):
         path = prediction_dir / f"{model}_oof_predictions.jsonl"
         event_scores: dict[str, list[float]] = defaultdict(list)
         control_scores: dict[str, list[float]] = defaultdict(list)
-        subtype_by_event: dict[str, set[str]] = defaultdict(set)
         with path.open(encoding="utf-8") as stream:
             for line in stream:
                 row = json.loads(line)
                 score = float(row["score"])
                 if row["label"]:
-                    event_id = _key(row)
-                    event_scores[event_id].append(score)
-                    subtype_by_event[event_id].update(row.get("event_signal_subtypes", []))
+                    for event in row.get("future_events", []):
+                        event_id = event["event_id"]
+                        event_scores[event_id].append(score)
                 elif row["source_cohort"] == "control_sample":
                     control_scores[row["group_id"]].append(score)
         event_means = [float(np.mean(values)) for values in event_scores.values()]
@@ -224,10 +224,12 @@ def diagnose(dataset: Path, prediction_dir: Path, fit_gap_date: str, output: Pat
     val_y = [int(row["label"]) for row in validation]
     print(f"Fit-gap fold {fit_gap_date}: fitting fixed temporal boosted tree", flush=True)
     tree_train, tree_val = fit_predict(train, validation, TREE_CONFIG)
-    print(f"Fit-gap fold {fit_gap_date}: fitting fixed compact CNN", flush=True)
-    cnn, normalizer = train_cnn(train, SEED + sorted({r["date_utc"] for r in rows}).index(fit_gap_date))
-    cnn_train = predict_cnn(cnn, train, normalizer)
-    cnn_val = predict_cnn(cnn, validation, normalizer)
+    print(f"Fit-gap fold {fit_gap_date}: fitting control-only Isolation Forest", flush=True)
+    forest, _ = fit_isolation_forest(
+        train, SEED + sorted({r["date_utc"] for r in rows}).index(fit_gap_date),
+    )
+    forest_train = isolation_anomaly_scores(forest, train)
+    forest_val = isolation_anomaly_scores(forest, validation)
 
     def fit_metrics(y: list[int], scores: np.ndarray) -> dict[str, float]:
         return {
@@ -246,8 +248,8 @@ def diagnose(dataset: Path, prediction_dir: Path, fit_gap_date: str, output: Pat
         "validation_positive_fraction_random_rank_ap_baseline": float(np.mean(val_y)),
         "temporal_hgb": {"train_in_sample": fit_metrics(train_y, tree_train),
                          "validation": fit_metrics(val_y, tree_val)},
-        "sequence_cnn": {"train_in_sample": fit_metrics(train_y, cnn_train),
-                         "validation": fit_metrics(val_y, cnn_val)},
+        "isolation_forest": {"train_in_sample": fit_metrics(train_y, forest_train),
+                             "validation": fit_metrics(val_y, forest_val)},
         "interpretation": (
             "Large training-to-validation gap indicates overfit or date/label shift, not underfitting. "
             "Low scores on both sides indicate weak input signal, a mismatched proxy target, or both."
@@ -261,8 +263,8 @@ def diagnose(dataset: Path, prediction_dir: Path, fit_gap_date: str, output: Pat
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=Path("data/learning/ten_day_development/declaration_windows.jsonl"))
-    parser.add_argument("--prediction-dir", type=Path, default=Path("data/learning/ten_day_development/temporal_comparison"))
+    parser.add_argument("--dataset", type=Path, default=Path("data/learning/ten_day_development/declaration_episode_windows.jsonl"))
+    parser.add_argument("--prediction-dir", type=Path, default=Path("data/learning/ten_day_development/temporal_episode_comparison"))
     parser.add_argument("--fit-gap-date", default="2025-08-15")
     parser.add_argument("--output", type=Path, default=Path("data/learning/ten_day_development/temporal_signal_diagnostics.json"))
     args = parser.parse_args()

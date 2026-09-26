@@ -1,9 +1,11 @@
 # Emergency prediction research pipeline
 
 Use **CPython 3.10.0** from `C:\tools\Python310_Custom\python.exe` for the
-local research environment. The deployed logistic inference remains standard
-library-only. The ten-day declaration corpus is development data; it does not
-include an untouched final test date. No command below downloads ADS-B archives.
+local research environment. Legacy logistic inference remains standard
+library-only; the primary Isolation Forest predictor uses the pinned
+scikit-learn runtime. The ten-day declaration corpus is development data; it
+does not include an untouched final test date. No command below downloads ADS-B
+archives.
 
 From the repository root, install the pinned dependencies and run the explicit
 ten-day commands below. The legacy three-day artifacts remain available for
@@ -19,34 +21,49 @@ the original three-day outputs intact:
 .\.venv\Scripts\python.exe -m ml.diagnose_temporal_signal
 ```
 
-The signal diagnostic compares event-level feature summaries against sampled
-control flight segments and candidate-aircraft negative segments, then reports
-train-versus-date-validation fit on one fixed fold. It runs no model sweep.
+Score one previously extracted `temporal_features` object with the research
+bundle:
 
-`compare_temporal_models` runs exactly one fixed 3-leaf/100-iteration temporal
-histogram boosted-tree baseline and one compact multi-output 1D CNN. It uses ten leave-one-
-date-out folds and removes any aircraft IDs shared with each validation date
-from that fold's training rows. The CNN sees 31 causal samples at 10-second
-intervals over the preceding five minutes: barometric altitude, groundspeed,
-vertical rate, track sine/cosine, on-ground state, anchor-relative east/north
-path offsets, and validity masks. Continuous values interpolate only across
-gaps up to 30 seconds; larger gaps stay masked. Fold normalization is fitted on
-training rows only. Signals within 60 seconds form one multi-label episode;
-the CNN predicts any declaration plus four common subtype heads. Rare subtype
-labels remain in audit and evaluation metadata. Signal values, subtype labels,
-absolute coordinates, and aircraft identity are never model inputs.
+```powershell
+.\.venv\Scripts\python.exe -m ml.predict --model data/learning/ten_day_development/temporal_episode_comparison/isolation_forest_research_bundle.joblib --features-json path/to/temporal_features.json
+```
+
+The result field is `anomaly_score`; a larger value means the window is more
+unusual relative to sampled controls. It is not an emergency probability.
+
+`compare_temporal_models` makes a control-flight Isolation Forest the primary
+predictor and compares it with the fixed 3-leaf/100-iteration temporal
+histogram boosted-tree baseline. It uses ten leave-one-date-out folds and
+removes aircraft IDs shared with each validation date from training. Each
+forest is fit only on sampled control-flight windows, capped at four evenly
+spaced windows per aircraft-day. These controls are not independently verified
+normal flights. The forest scores the existing causal temporal
+features from the preceding five minutes. Larger scores mean more unusual
+behavior; they are not probabilities. Emergency signals, labels, subtype
+values, absolute coordinates, and aircraft identity are never model inputs.
+
+Signals within 60 seconds form one multi-label episode. Evaluation measures
+any-declaration event recall, warning time, and false alerts per 1,000 observed
+control airborne hours, with window ROC AUC and average precision secondary.
+The report includes the full per-model score curves and a descriptive
+comparison at no more than one false alert per 1,000 control hours. This
+comparison does not select an operational threshold.
+
+`diagnose_temporal_signal` compares event-level feature summaries against
+sampled controls and candidate-aircraft negative segments, then reports
+train-versus-date-validation fit for the boosted-tree reference and the
+control-only forest on one fixed fold.
 
 This workflow writes `declaration_episode_windows.jsonl` and its own summary;
 the earlier `declaration_windows.jsonl` artifact is left intact. The output
-includes fold scores, a 201-point alert tradeoff grid at 0.005 score
-steps across the full range (plus a no-alert point), per-date curves, subtype
-counts, and nominal Wilson/Poisson uncertainty intervals. The pooled curve is
-also saved as `event_recall_vs_false_alerts.svg`. A separate
-`sequence_cnn_research_bundle.pt` contains the final
-all-ten-date multi-output research fit and preprocessing metadata. This bundle is not wired
-into deployed inference. AUC is secondary; no operational threshold is selected
-from these same ten dates. New dates collected after model and threshold freeze
-are required for a final evaluation.
+includes fold scores, per-date curves, subtype counts, and nominal
+Wilson/Poisson uncertainty intervals. The pooled curve is saved as
+`event_recall_vs_false_alerts.svg`. The final all-date fit is saved as
+`isolation_forest_research_bundle.joblib`; `ml.predict` can score one temporal
+feature mapping with this bundle and labels the output as an anomaly score. The
+bundle is research-only. No operational threshold is selected from these ten
+dates; new dates collected after the model and threshold are frozen are needed
+for a final evaluation.
 
 ## Declaration proxy
 
@@ -72,7 +89,11 @@ coordinates are never model features. The file contains the original
 17-value `features`, causal `temporal_features`, and (for the ten-day experiment)
 the 31-step sequence described above.
 
-## Ten-day development results
+## Historical supervised baseline results
+
+The figures below are from the earlier tree/CNN experiments and do not report
+the Isolation Forest. Rerun the documented ten-day workflow to create the
+current forest comparison and research bundle.
 
 The audit accepted 290 candidate traces under the ADS-B declaration proxy and
 excluded 58 lifeguard/reserved-only traces. The labeler produced 1321 positive
