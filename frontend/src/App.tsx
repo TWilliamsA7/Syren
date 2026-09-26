@@ -61,14 +61,34 @@ const ICON_MAPPING = {
   marker: { x: 0, y: 0, width: 128, height: 128, mask: false }
 };
 
+type Region = 'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST';
+const REGION_LABELS: [Region, string][] = [
+  ['US_ALL', 'All US'], ['US_WEST', 'West'], ['US_MIDWEST', 'Midwest'], ['US_SOUTH', 'South'], ['US_EAST', 'East']
+];
+
+// What the header shows for each replay state before the clock starts
+const REPLAY_STATE_TEXT: Record<string, string> = {
+  idle: 'Starting…', loading: 'Starting…', downloading: 'Downloading archive…',
+  exporting: 'Building replay…', failed: 'Failed', stopped: 'Stopped'
+};
+
+const formatNumber = (value: number | string | null | undefined, unit: string) =>
+  typeof value === 'number' ? `${value.toLocaleString()} ${unit}` : '—';
+
+// "16:00", "1600" or "9:05" -> "16:00" / "09:05"; null if it isn't a 24-hour time
+const parseTime24 = (text: string) => {
+  const match = text.trim().match(/^(\d{1,2}):?(\d{2})$/);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return null;
+  return `${match[1].padStart(2, '0')}:${match[2]}`;
+};
+
 function App() {
   const [aircraftList, setAircraftList] = useState<Aircraft[]>([]);
   const [isLive, setIsLive] = useState<boolean>(true);
-  const [lastUpdated, setLastUpdated] = useState<string>('Initializing...');
-  
-  const [currentRegion, setCurrentRegion] = useState<'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST'>('US_ALL');
+  const [lastUpdated, setLastUpdated] = useState<string>('—');
+
+  const [currentRegion, setCurrentRegion] = useState<Region>('US_ALL');
   const [viewState, setViewState] = useState(DEFAULT_VIEW_STATE);
-  const [simState, setSimState] = useState<'running' | 'paused'>('running');
 
   // Search state
   const [searchDate, setSearchDate] = useState<string>('2026-09-24');
@@ -115,8 +135,8 @@ function App() {
             if (cancelled) return;
             setHistoryStatusInfo(data);
             if (data.clock) {
-              const dateObj = new Date(data.clock * 1000);
-              setReplayClockFormatted(dateObj.toUTCString());
+              // e.g. "2026-09-24 16:05:32Z"
+              setReplayClockFormatted(new Date(data.clock * 1000).toISOString().slice(0, 19).replace('T', ' ') + 'Z');
             }
           }
         } catch (e) {
@@ -168,7 +188,7 @@ function App() {
 
         setAircraftList(parsedData);
         setIsLive(true);  // COOKED only when the fetch fails, not during every replay
-        setLastUpdated(new Date().toUTCString());
+        setLastUpdated(new Date().toISOString().slice(11, 19) + 'Z');
         consecutiveFailuresRef.current = 0;
 
         // Schedule next standard check interval (1 second)
@@ -196,6 +216,7 @@ function App() {
 
   // Backend API Call Handlers for History Controls
   const startHistory = async (date: string, startTime: string = "16:00") => {
+    setReplayClockFormatted('');  // don't show the last replay's clock while this one loads
     try {
       const response = await fetch('/api/start_history', {
         method: 'POST',
@@ -242,8 +263,15 @@ function App() {
       return;
     }
 
+    const startTime = parseTime24(searchStartTime);
+    if (!startTime) {
+      setSearchError('Start time must be 24-hour HH:MM, e.g. 16:00.');
+      return;
+    }
+    setSearchStartTime(startTime);
+
     // Trigger backend history replay session for the selected date and start time
-    startHistory(searchDate, searchStartTime);
+    startHistory(searchDate, startTime);
 
     const query = searchIcao.trim().toLowerCase();
     if (query) {
@@ -280,7 +308,7 @@ function App() {
     setSearchError('');
   };
 
-  const handleRegionChange = (region: 'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST') => {
+  const handleRegionChange = (region: Region) => {
     setCurrentRegion(region);
     setViewState(v => ({
       ...v,
@@ -288,7 +316,23 @@ function App() {
     }));
   };
 
-  const hasFeedAnomaly = aircraftList.some(a => a.emergency && a.emergency !== 'none');
+  const emergencyCount = aircraftList.filter(a => a.emergency && a.emergency !== 'none').length;
+
+  const replayState: string = historyStatusInfo.state;
+  const canSkip = historyMode && replayState === 'playing';
+  const preparingReplay = historyMode && replayState !== 'playing' && replayState !== 'stopped';
+  const downloadPercent = historyStatusInfo.total_bytes > 0
+    ? Math.round((historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100)
+    : 0;
+  const exportPercent = historyStatusInfo.export_total > 0
+    ? Math.round((historyStatusInfo.export_done / historyStatusInfo.export_total) * 100)
+    : null;  // the backend doesn't report export progress yet
+
+  const feedLabel = !isLive ? 'Offline' : historyMode ? 'Replay' : 'Live';
+  const feedDot = !isLive ? 'red' : historyMode ? 'accent' : 'green';
+  const feedDetail = !historyMode
+    ? 'US airspace'
+    : replayState === 'playing' ? replayClockFormatted : (REPLAY_STATE_TEXT[replayState] ?? replayState);
 
   // Define Deck.GL Layers for Aircraft visualization mapped to geo coordinates
   const layers = [
@@ -319,52 +363,22 @@ function App() {
 
   return (
     <div className="syren-container">
-      
-      {/* Top Header */}
+
       <header className="syren-header">
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: '1rem' }}>
-          <h1 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.5rem', fontWeight: '800', letterSpacing: '-0.025em' }}>
-            SYREN <span style={{ color: 'var(--accent)', fontSize: '0.875rem', fontWeight: '400' }}>// Edge Aviation Crisis Engine</span>
-          </h1>
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: '1rem' }}>
-            {!historyMode 
-              ? 'ADS-B Live US Airspace Feed' 
-              : `Replay Mode: ${searchDate} @ ${searchStartTime} | ${replayClockFormatted || historyStatusInfo.state}`}
-          </span>
+        <div className="header-left">
+          <h1 className="wordmark">SYREN</h1>
+          <div className="mode">
+            <span className={`dot ${feedDot}`} />
+            <span className="mode-label">{feedLabel}</span>
+            <span className={`mode-detail ${canSkip ? 'mono' : ''}`}>{feedDetail}</span>
+            {historyMode && <button className="link" onClick={returnToLive}>Back to live</button>}
+          </div>
         </div>
-
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          <button 
-            onClick={returnToLive}
-            style={{ 
-              backgroundColor: isLive ? 'rgba(54, 246, 180, 0.15)' : 'rgba(244, 63, 94, 0.15)', 
-              color: isLive ? 'var(--green)' : 'var(--red)', 
-              border: `1px solid ${isLive ? 'var(--green)' : 'var(--red)'}`, 
-              padding: '0.375rem 0.75rem', 
-              borderRadius: '0.375rem', 
-              fontWeight: '700', 
-              cursor: 'pointer', 
-              fontSize: '0.75rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.35rem'
-            }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isLive ? 'var(--green)' : 'var(--red)' }}></span>
-            {isLive ? 'Live Feed Active' : "IT'S COOKED - NOT LIVE ANYMORE"}
-          </button>
-
-          <button 
-            onClick={() => setSimState(simState === 'running' ? 'paused' : 'running')}
-            style={{ backgroundColor: simState === 'running' ? 'var(--red)' : 'var(--green)', color: '#0F172A', border: 'none', padding: '0.375rem 0.75rem', borderRadius: '0.375rem', fontWeight: '700', cursor: 'pointer', fontSize: '0.75rem' }}>
-            {simState === 'running' ? 'POST /api/pause' : 'POST /api/start'}
-          </button>
-        </div>
+        <div className="header-readout mono">updated {lastUpdated}</div>
       </header>
 
-      {/* Workspace Grid */}
       <div className="syren-workspace">
-        
-        {/* Left Side: Coordinate-mapped Deck.GL Map Canvas & Earth Background */}
+
         <div className="map-placeholder" style={{ position: 'relative', overflow: 'hidden' }}>
           <div className="map-grid-bg" style={{ zIndex: 1, pointerEvents: 'none' }} />
 
@@ -382,244 +396,145 @@ function App() {
             />
           </DeckGL>
 
-          {/* Hover Tooltip Overlay */}
           {hoveredAircraft && (
-            <div style={{
-              position: 'absolute',
-              bottom: '2rem',
-              left: '2rem',
-              backgroundColor: 'rgba(15, 23, 42, 0.9)',
-              border: '1px solid var(--accent)',
-              padding: '0.75rem 1rem',
-              borderRadius: '0.5rem',
-              zIndex: 30,
-              fontSize: '0.75rem',
-              color: 'var(--text-main)',
-              pointerEvents: 'none',
-              backdropFilter: 'blur(4px)'
-            }}>
-              <div>Flight: <strong style={{ color: 'var(--accent)' }}>{hoveredAircraft.flight?.trim() || 'N/A'}</strong> ({hoveredAircraft.hex})</div>
-              <div>Alt: <strong>{hoveredAircraft.alt_baro} ft</strong> | GS: <strong>{hoveredAircraft.gs} kts</strong></div>
-              <div>Squawk: <strong style={{ color: 'var(--green)' }}>{hoveredAircraft.squawk || 'N/A'}</strong></div>
+            <div className="map-tooltip">
+              <div className="callsign">
+                {hoveredAircraft.flight?.trim() || 'Unknown'}
+                <span className="mono">{hoveredAircraft.hex}</span>
+              </div>
+              <dl className="kv">
+                <dt>Altitude</dt><dd>{formatNumber(hoveredAircraft.alt_baro, 'ft')}</dd>
+                <dt>Ground speed</dt><dd>{formatNumber(hoveredAircraft.gs, 'kt')}</dd>
+                <dt>Squawk</dt><dd>{hoveredAircraft.squawk || '—'}</dd>
+              </dl>
             </div>
           )}
 
-          {/* Region Zoom Toolbar */}
           <div className="map-toolbar" style={{ zIndex: 20 }}>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '0.25rem' }}>Region Zoom:</span>
-            <button className={currentRegion === 'US_ALL' ? 'active' : ''} onClick={() => handleRegionChange('US_ALL')}>Continental US</button>
-            <button className={currentRegion === 'US_WEST' ? 'active' : ''} onClick={() => handleRegionChange('US_WEST')}>West Coast</button>
-            <button className={currentRegion === 'US_MIDWEST' ? 'active' : ''} onClick={() => handleRegionChange('US_MIDWEST')}>Midwest US</button>
-            <button className={currentRegion === 'US_SOUTH' ? 'active' : ''} onClick={() => handleRegionChange('US_SOUTH')}>South US</button>
-            <button className={currentRegion === 'US_EAST' ? 'active' : ''} onClick={() => handleRegionChange('US_EAST')}>East Coast</button>
-          </div>
-
-          {/* Map Status Badge */}
-          <div style={{ position: 'absolute', bottom: '1.5rem', right: '1.5rem', zIndex: 20, backgroundColor: 'rgba(15, 23, 42, 0.85)', padding: '0.5rem 1rem', borderRadius: '0.375rem', border: '1px solid var(--border)', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-            Deck.GL Active Layer Rendering ({aircraftList.length} entities)
+            {REGION_LABELS.map(([region, label]) => (
+              <button key={region} className={currentRegion === region ? 'active' : ''} onClick={() => handleRegionChange(region)}>
+                {label}
+              </button>
+            ))}
           </div>
         </div>
 
-        {/* Right Side: Sidebar (Search & Feed Information) */}
-        <div className="sidebar">
-          
-          {/* Historical Search Box & Replay Control Buttons */}
-          <div className="search-box">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
-              <div style={{ fontSize: '0.8125rem', fontWeight: '700', color: 'var(--accent)' }}>
-                History Replay & Archive Controls
-              </div>
-              {historyMode && (
-                <button 
-                  onClick={returnToLive}
-                  style={{ background: 'none', border: 'none', color: 'var(--green)', fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'underline', padding: 0 }}>
-                  Exit Date Mode
-                </button>
-              )}
+        <aside className="sidebar">
+
+          <section className="panel-section">
+            <div className="section-head">
+              <h2>Replay a day</h2>
+              {historyMode && <button className="link" onClick={returnToLive}>Back to live</button>}
             </div>
-            
+
             <form onSubmit={handleSearch}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                <div>
-                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Date (Required)</label>
-                  <input 
-                    type="date" 
-                    value={searchDate} 
-                    onChange={(e) => setSearchDate(e.target.value)} 
-                    style={{ margin: '0.25rem 0 0 0', width: '100%' }}
+              <div className="field-row">
+                <label className="field">
+                  <span>Date</span>
+                  <input type="date" value={searchDate} onChange={(e) => setSearchDate(e.target.value)} />
+                </label>
+                <label className="field">
+                  <span>Start (UTC)</span>
+                  <input
+                    type="text"
+                    className="time-input"
+                    inputMode="numeric"
+                    maxLength={5}
+                    placeholder="16:00"
+                    value={searchStartTime}
+                    onChange={(e) => setSearchStartTime(e.target.value)}
                   />
-                </div>
-                <div>
-                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Start Time (UTC)</label>
-                  <input 
-                    type="time" 
-                    value={searchStartTime} 
-                    onChange={(e) => setSearchStartTime(e.target.value)} 
-                    style={{ margin: '0.25rem 0 0 0', width: '100%' }}
-                  />
-                </div>
+                </label>
               </div>
-
-              <div style={{ marginBottom: '0.5rem' }}>
-                <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>ICAO / Callsign</label>
-                <input 
-                  type="text" 
-                  placeholder="e.g. ac0094" 
-                  value={searchIcao} 
-                  onChange={(e) => setSearchIcao(e.target.value)} 
-                  style={{ margin: '0.25rem 0 0 0', width: '100%' }}
-                />
-              </div>
-
-              {searchError && <div style={{ color: 'var(--red)', fontSize: '0.7rem', marginBottom: '0.375rem' }}>{searchError}</div>}
-              
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.35rem', marginBottom: '0.35rem' }}>
-                <button 
-                  type="button" 
-                  onClick={() => startHistory(searchDate, searchStartTime)}
-                  style={{ backgroundColor: 'var(--accent)', color: 'var(--text-main)', border: 'none', padding: '0.4rem', borderRadius: '0.375rem', fontWeight: 'bold', fontSize: '0.7rem', cursor: 'pointer' }}>
-                  Enter a date
-                </button>
-                <button 
-                  type="button" 
-                  onClick={returnToLive}
-                  style={{ backgroundColor: 'rgba(244, 63, 94, 0.2)', color: 'var(--red)', border: '1px solid var(--red)', padding: '0.4rem', borderRadius: '0.375rem', fontWeight: 'bold', fontSize: '0.7rem', cursor: 'pointer' }}>
-                  Exit date mode
-                </button>
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.35rem' }}>
-                <button 
-                  type="button" 
-                  onClick={() => skipTime(-300)}
-                  disabled={!historyMode || historyStatusInfo.state !== 'playing'}
-                  style={{ backgroundColor: historyMode && historyStatusInfo.state === 'playing' ? '#334155' : '#1e293b', color: historyMode && historyStatusInfo.state === 'playing' ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode && historyStatusInfo.state === 'playing' ? 'pointer' : 'not-allowed' }}>
-                  &lt;&lt; Go back (-5m)
-                </button>
-                <button 
-                  type="button" 
-                  onClick={() => skipTime(300)}
-                  disabled={!historyMode || historyStatusInfo.state !== 'playing'}
-                  style={{ backgroundColor: historyMode && historyStatusInfo.state === 'playing' ? '#334155' : '#1e293b', color: historyMode && historyStatusInfo.state === 'playing' ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode && historyStatusInfo.state === 'playing' ? 'pointer' : 'not-allowed' }}>
-                  Go forward (+5m) &gt;&gt;
-                </button>
-              </div>
+              <label className="field">
+                <span>Aircraft <em>optional</em></span>
+                <input type="text" placeholder="ICAO hex or callsign, e.g. ac0094" value={searchIcao} onChange={(e) => setSearchIcao(e.target.value)} />
+              </label>
+              {searchError && <p className="form-error">{searchError}</p>}
+              <button type="submit" className="btn primary">Load replay</button>
             </form>
-          </div>
 
-          {/* MULTISTAGE REPLAY PROGRESS PANEL */}
-          {historyMode && historyStatusInfo.state !== 'playing' && historyStatusInfo.state !== 'stopped' && (
-            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--accent)', borderRadius: '0.5rem', padding: '1.25rem', marginBottom: '1rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--accent)', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
-                Multistage Pipeline Progress
+            {historyMode && (
+              <div className="transport">
+                <button className="btn" onClick={() => skipTime(-300)} disabled={!canSkip}>−5 min</button>
+                <span className="mono">{canSkip ? replayClockFormatted.slice(11) : '--:--:--'}</span>
+                <button className="btn" onClick={() => skipTime(300)} disabled={!canSkip}>+5 min</button>
               </div>
-              
-              {/* Stage 1: Downloading */}
-              <div style={{ marginBottom: '0.875rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: historyStatusInfo.state === 'downloading' ? 'var(--accent)' : 'var(--text-muted)', marginBottom: '0.25rem' }}>
-                  <span>1. Downloading Archive from GitHub</span>
-                  <span>
-                    {historyStatusInfo.total_bytes > 0 
-                      ? `${Math.round((historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100)}%` 
-                      : historyStatusInfo.state === 'downloading' ? '0%' : '100%'}
+            )}
+          </section>
+
+          {preparingReplay && (
+            <section className="panel-section">
+              <h2>Preparing {historyStatusInfo.date ?? searchDate}</h2>
+
+              <div className={`step ${replayState === 'downloading' ? 'active' : ''}`}>
+                <div className="step-line">
+                  <span>Download archive</span>
+                  <span className="mono">
+                    {replayState === 'downloading' ? `${downloadPercent}%`
+                      : replayState === 'loading' ? '' : historyStatusInfo.total_bytes > 0 ? 'done' : 'on disk'}
                   </span>
                 </div>
-                <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
-                  <div 
-                    style={{ 
-                      width: `${historyStatusInfo.total_bytes > 0 ? (historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100 : (historyStatusInfo.state === 'downloading' ? 0 : 100)}%`, 
-                      height: '100%', 
-                      backgroundColor: 'var(--accent)',
-                      transition: 'width 0.2s ease-in-out'
-                    }} 
-                  />
+                <div className="bar">
+                  <div style={{ width: `${replayState === 'downloading' ? downloadPercent : replayState === 'loading' ? 0 : 100}%` }} />
                 </div>
               </div>
 
-              {/* Stage 2: Exporting to Frontend / Parsing */}
-              <div style={{ marginBottom: '0.75rem' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: historyStatusInfo.state === 'exporting' ? 'var(--accent)' : 'var(--text-muted)', marginBottom: '0.25rem' }}>
-                  <span>2. Exporting & Rendering to Frontend</span>
-                  <span>
-                    {historyStatusInfo.export_total > 0 
-                      ? `${Math.round((historyStatusInfo.export_done / historyStatusInfo.export_total) * 100)}%` 
-                      : '0%'}
-                  </span>
+              <div className={`step ${replayState === 'exporting' ? 'active' : ''}`}>
+                <div className="step-line">
+                  <span>Build replay</span>
+                  <span className="mono">{replayState === 'exporting' ? (exportPercent === null ? 'working' : `${exportPercent}%`) : ''}</span>
                 </div>
-                <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
-                  <div 
-                    style={{ 
-                      width: `${historyStatusInfo.export_total > 0 ? (historyStatusInfo.export_done / historyStatusInfo.export_total) * 100 : 0}%`, 
-                      height: '100%', 
-                      backgroundColor: 'var(--green)',
-                      transition: 'width 0.2s ease-in-out'
-                    }} 
-                  />
+                <div className={`bar ${replayState === 'exporting' && exportPercent === null ? 'indeterminate' : ''}`}>
+                  <div style={{ width: `${exportPercent ?? 0}%` }} />
                 </div>
               </div>
 
-              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
-                Current Status: <strong style={{ textTransform: 'uppercase', color: 'var(--text-main)' }}>{historyStatusInfo.state}</strong> (Controls unlock once playing)
-              </div>
-            </div>
+              {replayState === 'failed'
+                ? <p className="form-error">{historyStatusInfo.error}</p>
+                : <p className="hint">The skip buttons unlock once the replay starts playing.</p>}
+            </section>
           )}
 
-          {/* PERSISTENT AIRSPACE VOLUME & ANOMALY STATUS COMPONENTS */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
-            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>
-                Current US Airspace Volume
-              </div>
-              <div style={{ fontSize: '2rem', fontWeight: '800', color: 'var(--accent)' }}>{aircraftList.length.toLocaleString()}</div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active transponders rendering on Deck.GL</div>
+          <section className="panel-section">
+            <h2>Airspace</h2>
+            <div className="stat">
+              <span className="stat-value mono">{aircraftList.length.toLocaleString()}</span>
+              <span className="stat-label">aircraft {historyMode ? 'in replay' : 'tracked'}</span>
             </div>
-
-            <div style={{ 
-              backgroundColor: 'var(--bg-sidebar)', 
-              border: `1px solid ${hasFeedAnomaly ? 'var(--red)' : 'var(--green)'}`, 
-              borderRadius: '0.5rem', 
-              padding: '1.25rem' 
-            }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Overall Feed Anomaly Status</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.125rem', fontWeight: '700', color: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}>
-                <span style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}></span>
-                {hasFeedAnomaly ? 'ALERT: Emergency Squawk Detected' : 'All US Telemetry Nominal'}
-              </div>
+            <div className={`status-line ${emergencyCount > 0 ? 'alert' : ''}`}>
+              <span className={`dot ${emergencyCount > 0 ? 'red' : 'green'}`} />
+              {emergencyCount > 0
+                ? `${emergencyCount} aircraft squawking an emergency`
+                : 'No emergency squawks'}
             </div>
+          </section>
 
-            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem', fontSize: '0.8125rem' }}>
-              <div style={{ fontWeight: '700', color: 'var(--text-main)', marginBottom: '0.75rem' }}>Telemetry System Metadata</div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>
-                <span>Query Timestamp:</span>
-                <strong style={{ color: 'var(--text-main)' }}>{lastUpdated}</strong>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
-                <span>API Status:</span>
-                <strong style={{ color: isLive ? 'var(--green)' : 'var(--red)' }}>
-                  {isLive ? 'No error' : 'COOKED (Offline)'}
-                </strong>
-              </div>
-            </div>
-          </div>
+          <section className="panel-section">
+            <h2>Feed</h2>
+            <dl className="kv">
+              <dt>Source</dt><dd>{historyMode ? 'adsb.lol archive' : 'adsb.lol live'}</dd>
+              <dt>Status</dt><dd className={isLive ? 'ok' : 'bad'}>{isLive ? 'OK' : 'Offline'}</dd>
+              <dt>Last update</dt><dd>{lastUpdated}</dd>
+            </dl>
+          </section>
 
-          {/* SEARCHED AIRCRAFT */}
           {searchedAircraft && viewMode === 'search_result' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, overflowY: 'auto' }}>
-              <div style={{ 
-                backgroundColor: 'var(--bg-sidebar)', 
-                border: '1px solid var(--accent)', 
-                borderRadius: '0.5rem', 
-                padding: '1.25rem' 
-              }}>
-                <h3 style={{ margin: 0, fontSize: '1.125rem', fontWeight: '800' }}>{searchedAircraft.flight?.trim() || searchedAircraft.hex}</h3>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-                  Alt: <strong>{searchedAircraft.alt_baro} ft</strong> | GS: <strong>{searchedAircraft.gs} kts</strong>
-                </div>
-              </div>
-            </div>
+            <section className="panel-section">
+              <h2>Aircraft</h2>
+              <p className="aircraft-name">
+                {searchedAircraft.flight?.trim() || searchedAircraft.hex}
+                <span className="mono">{searchedAircraft.hex}</span>
+              </p>
+              <dl className="kv">
+                <dt>Altitude</dt><dd>{formatNumber(searchedAircraft.alt_baro, 'ft')}</dd>
+                <dt>Ground speed</dt><dd>{formatNumber(searchedAircraft.gs, 'kt')}</dd>
+                <dt>Squawk</dt><dd>{searchedAircraft.squawk || '—'}</dd>
+              </dl>
+            </section>
           )}
 
-        </div>
+        </aside>
 
       </div>
     </div>
