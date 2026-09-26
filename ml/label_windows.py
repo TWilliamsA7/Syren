@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from ml.features import FEATURE_NAMES, extract_features
+from ml.features import FEATURE_NAMES, TEMPORAL_FEATURE_NAMES, extract_features, extract_temporal_features
 from scripts.collect_adsb_days import inspect_trace
 from scripts.fetch_event_traces import TraceError, load_raw_trace, trace_points
 
@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--collection-dir", type=Path, default=DEFAULT_COLLECTION)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--audit-file", type=Path, default=DEFAULT_OUTPUT / "candidate_audit.jsonl")
     parser.add_argument("--context-seconds", type=float, default=300)
     parser.add_argument("--min-lead-seconds", type=float, default=120)
     parser.add_argument("--horizon-seconds", type=float, default=600)
@@ -88,6 +89,20 @@ def segments(points: list[dict[str, Any]], max_gap_s: float) -> Iterator[list[di
         segment.append(point)
     if segment:
         yield segment
+
+
+def airborne_exposure(segment: list[dict[str, Any]], index: int, seconds: float) -> float:
+    """Observed airborne time after an anchor, capped at the next stride."""
+    anchor = segment[index]["timestamp_unix_s"]
+    end = anchor + seconds
+    total = 0.0
+    for j in range(index, len(segment) - 1):
+        left, right = segment[j], segment[j + 1]
+        if left["timestamp_unix_s"] >= end:
+            break
+        if left.get("on_ground") is False and right.get("on_ground") is False:
+            total += max(0.0, min(end, right["timestamp_unix_s"]) - left["timestamp_unix_s"])
+    return total
 
 
 def checked_trace(record: dict[str, Any], collection_dir: Path, positive_manifest: bool) -> tuple[list[dict[str, Any]], float | None]:
@@ -159,6 +174,7 @@ def labeled_rows(
             if not positive and times[-1] < anchor + config.horizon_seconds:
                 continue
             features = extract_features(history)
+            temporal_features = extract_temporal_features(history)
             if tuple(features) != FEATURE_NAMES:
                 raise ValueError("Feature schema changed unexpectedly")
             last_anchor = anchor
@@ -181,7 +197,10 @@ def labeled_rows(
                 "event_unix_s": event_time if positive else None,
                 "event_utc": utc(event_time) if positive and event_time is not None else None,
                 "trace_file": record["trace_file"],
+                "source_cohort": "candidate" if event_time is not None else "control_sample",
                 "features": features,
+                "temporal_features": temporal_features,
+                "airborne_exposure_seconds": airborne_exposure(segment, index, config.stride_seconds),
             }
 
 
@@ -199,6 +218,22 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
     ]
     if not records or not any(positive for positive, _ in records):
         raise ValueError("No candidate and control manifests found")
+    if not config.audit_file.is_file():
+        raise ValueError(f"Missing candidate audit; run python -m ml.audit_candidates first: {config.audit_file}")
+    audit = {}
+    with config.audit_file.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            key = (item["date_utc"], item["icao24"])
+            if key in audit:
+                raise ValueError(f"Duplicate audit row: {key}")
+            audit[key] = item
+    candidate_keys = {(record["date_utc"], record["icao24"].lower())
+                      for positive, record in records if positive}
+    if set(audit) != candidate_keys:
+        raise ValueError(f"Candidate audit does not match manifests; missing={candidate_keys - set(audit)}, extra={set(audit) - candidate_keys}")
     completed_dates = {path.stem for path in (config.collection_dir / "reports").glob("*.json")}
     keys: set[tuple[str, str]] = set()
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +253,20 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
                 if key in keys:
                     raise ValueError(f"Duplicate aircraft-day across manifests: {key}")
                 keys.add(key)
+                if positive_manifest:
+                    decision = audit.get(key)
+                    if decision is None or decision["trace_file"] != record["trace_file"]:
+                        raise ValueError(f"Missing or mismatched audit decision: {key}")
+                    if decision["decision"] == "exclude_proxy":
+                        counts["excluded_candidate_traces"] += 1
+                        continue
+                    if decision["decision"] != "include_proxy":
+                        raise ValueError(f"Unknown audit decision: {key}")
                 points, event_time = checked_trace(record, config.collection_dir, positive_manifest)
+                if positive_manifest:
+                    event_time = decision["usable_onset_unix_s"]
+                    if event_time is None:
+                        raise ValueError(f"Included candidate has no onset: {key}")
                 counts["candidate_traces" if positive_manifest else "control_traces"] += 1
                 trace_positive = 0
                 for example in labeled_rows(points, event_time, record, config):
@@ -250,10 +298,12 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
     summary = {
         "schema_version": 1,
         "target": TARGET,
-        "target_meaning": "First observed ADS-B emergency status or squawk 7500/7600/7700 within the lead-time window; this is not independently confirmed incident risk.",
+        "target_meaning": "First audited usable ADS-B emergency status or squawk 7500/7600/7700 within the lead-time window; lifeguard-only status is excluded. This is not independently confirmed incident risk.",
         "collection_dir": str(config.collection_dir.resolve()),
         "examples_file": str(output.resolve()),
         "feature_names": list(FEATURE_NAMES),
+        "temporal_feature_names": list(TEMPORAL_FEATURE_NAMES),
+        "audit_file": str(config.audit_file.resolve()),
         "config": {
             "context_seconds": config.context_seconds,
             "min_lead_seconds": config.min_lead_seconds,

@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "label_definition": "These source-backed records identify aircraft involved in accidents or documented in-flight emergencies. They are outcome labels, not ADS-B declaration labels. The event aircraft must not be marked positive at every timestamp; forecasting labels are generated from event time, uncertainty, and a stated prediction horizon.",
+  "events": [
+    {
+      "event_id": "DCA26MA352-21AIR-7598",
+      "event_type": "runway_overrun",
+      "label_type": "accident_outcome",
+      "event_date_local": "2026-09-06",
+      "event_time_utc": "2026-09-06T17:53:00Z",
+      "event_time_precision": "minute_estimate",
+      "event_time_source": "NTSB Reports lists the event at 13:53 EDT; converted to 17:53 UTC. Treat as minute-level timing, not a recorder-synchronized timestamp.",
+      "location": "Miami International Airport (MIA), Miami, Florida",
+      "flight": "21 Air Flight 7598 / Amazon Air Flight 7598",
+      "investigation_id": "DCA26MA352",
+      "sources": [
+        "https://www.ntsb.gov/investigations/Pages/DCA26MA352.aspx",
+        "https://ntsb-reports.com/data/20260906203747/2026-09-06-Boeing-767-33A-N1997A-21-Air-Miami"
+      ],
+      "aircraft": [
+        {
+          "role": "accident_aircraft",
+          "registration": "N1997A",
+          "icao24": "a18ce8",
+          "trace_dates_utc": ["2026-09-06"],
+          "adsb_history_expected": true,
+          "identity_source": "https://www.faa.gov/air_traffic/separation_standards/naarmo/rvsm_approvals"
+        }
+      ],
+      "collection_notes": "NTSB confirms the event, date, flight number, and runway overrun. The fetched trace identifies registration N1997A, matching the event record; the event time is only minute-level."
+    },
+    {
+      "event_id": "AAIB-2025-AI171",
+      "event_type": "takeoff_crash",
+      "label_type": "accident_outcome",
+      "event_date_local": "2025-06-12",
+      "event_time_utc": "2025-06-12T08:09:00Z",
+      "event_time_precision": "minute",
+      "location": "Ahmedabad, India",
+      "flight": "Air India Flight AI171",
+      "investigation_id": "AAIB VT-ANB preliminary report",
+      "sources": [
+        "https://www.aaib.gov.in/Reports/2025/Accident/Preliminary%20Report%20VT-ANB.pdf"
+      ],
+      "aircraft": [
+        {
+          "role": "accident_aircraft",
+          "registration": "VT-ANB",
+          "icao24": "8005ec",
+          "trace_dates_utc": ["2025-06-12"],
+          "adsb_history_expected": true,
+          "identity_source": "https://www.planespotters.net/hex/8005EC"
+        }
+      ],
+      "collection_notes": "The AAIB preliminary report identifies VT-ANB and says the crash occurred shortly after takeoff. The short pre-event duration may limit forecasting value; retain as an outcome case, not automatically as a declaration case."
+    },
+    {
+      "event_id": "DCA26MA161-AC8646",
+      "event_type": "landing_runway_vehicle_collision",
+      "label_type": "accident_outcome",
+      "event_date_local": "2026-03-22",
+      "event_time_utc": "2026-03-23T03:37:00Z",
+      "event_time_precision": "minute",
+      "location": "LaGuardia Airport (LGA), New York, New York",
+      "flight": "Air Canada Express Flight 8646 / Jazz Aviation flight 646",
+      "investigation_id": "DCA26MA161",
+      "sources": [
+        "https://www.ntsb.gov/investigations/Pages/DCA26MA161.aspx"
+      ],
+      "aircraft": [
+        {
+          "role": "accident_aircraft",
+          "registration": "C-GNJZ",
+          "icao24": "c06800",
+          "trace_dates_utc": ["2026-03-23"],
+          "adsb_history_expected": true,
+          "identity_source": "https://airport-data.com/aircraft/C-GNJZ"
+        }
+      ],
+      "collection_notes": "The event was at 23:37 EDT on March 22, which is 03:37 UTC on March 23. The collision involved an airport rescue vehicle; that vehicle is not represented by the aircraft-only trace."
+    },
+    {
+      "event_id": "DCA25MA108-POTOMAC",
+      "event_type": "midair_collision",
+      "label_type": "accident_outcome",
+      "event_date_local": "2025-01-29",
+      "event_time_utc": "2025-01-30T01:48:00Z",
+      "event_time_precision": "minute",
+      "location": "Near Ronald Reagan Washington National Airport (DCA), Arlington, Virginia",
+      "flight": "PSA Airlines Flight 5342 / American Eagle 5342 and US Army callsign PAT25",
+      "investigation_id": "DCA25MA108",
+      "sources": [
+        "https://www.ntsb.gov/investigations/Pages/DCA25MA108.aspx",
+        "https://www.govinfo.gov/content/pkg/CHRG-119shrg64071/pdf/CHRG-119shrg64071.pdf"
+      ],
+      "aircraft": [
+        {
+          "role": "airliner",
+          "registration": "N709PS",
+          "icao24": "a97753",
+          "trace_dates_utc": ["2025-01-30"],
+          "adsb_history_expected": true,
+          "identity_source": "https://www.planespotters.net/hex/A97753"
+        },
+        {
+          "role": "helicopter",
+          "registration": null,
+          "callsign": "PAT25",
+          "icao24": null,
+          "trace_dates_utc": [],
+          "adsb_history_expected": false,
+          "identity_source": "https://www.govinfo.gov/content/pkg/CHRG-119shrg64071/pdf/CHRG-119shrg64071.pdf",
+          "collection_notes": "Government hearing material says PAT25 was not required to broadcast ADS-B Out on this mission. Do not treat a missing ADSB.lol trace as a failed download or as evidence the helicopter was absent."
+        }
+      ],
+      "collection_notes": "NTSB confirms the airliner identity and event time. The helicopter's accident path was reconstructed from non-ADSB sources, so this aircraft-only fetch cannot reproduce the full collision geometry."
+    },
+    {
+      "event_id": "ERA25MA106-PHILADELPHIA-MEDEVAC",
+      "event_type": "takeoff_crash",
+      "label_type": "accident_outcome",
+      "event_date_local": "2025-01-31",
+      "event_time_utc": "2025-01-31T23:07:00Z",
+      "event_time_precision": "minute",
+      "location": "Northeast Philadelphia Airport (PNE), Philadelphia, Pennsylvania",
+      "flight": "Med Jets Flight 056 / MTS056",
+      "investigation_id": "ERA25MA106",
+      "sources": [
+        "https://data.ntsb.gov/carol-repgen/api/Aviation/ReportMain/GenerateNewestReport/199630/pdf"
+      ],
+      "aircraft": [
+        {
+          "role": "accident_aircraft",
+          "registration": "XA-UCI",
+          "icao24": "0d086e",
+          "trace_dates_utc": ["2025-01-31"],
+          "adsb_history_expected": true,
+          "identity_source": "https://www.airnavradar.com/data/mode-s/0D086E"
+        }
+      ],
+      "collection_notes": "The NTSB preliminary report says FAA ADS-B track data covered approximately one minute and that no distress call was received. This is an accident-outcome case with very limited lead-time telemetry, not a known emergency declaration."
+    },
+    {
+      "event_id": "DCA24MA063-ALASKA-1282",
+      "event_type": "inflight_depressurization",
+      "label_type": "verified_emergency_outcome",
+      "event_date_local": "2024-01-05",
+      "event_time_utc": "2024-01-06T01:13:00Z",
+      "event_time_precision": "minute_estimate",
+      "event_time_source": "NTSB states about 5:13 p.m. Pacific standard time on January 5; converted to 01:13 UTC on January 6.",
+      "location": "Near Portland International Airport (PDX), Oregon",
+      "flight": "Alaska Airlines Flight 1282",
+      "investigation_id": "DCA24MA063",
+      "sources": [
+        "https://www.ntsb.gov/investigations/Pages/DCA24MA063.aspx",
+        "https://www.ntsb.gov/Advocacy/Activities/Pages/Homendy20250624.aspx"
+      ],
+      "aircraft": [
+        {
+          "role": "event_aircraft",
+          "registration": "N704AL",
+          "icao24": "a96375",
+          "trace_dates_utc": ["2024-01-06"],
+          "adsb_history_expected": true,
+          "identity_source": "https://www.planespotters.net/hex/A96375"
+        }
+      ],
+      "collection_notes": "Official NTSB sources document the door-plug separation and rapid depressurization. The aircraft trace has not been fetched; no training windows are assigned from this case yet."
+    }
+  ]
+}

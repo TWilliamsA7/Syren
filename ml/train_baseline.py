@@ -10,7 +10,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from ml.features import FEATURE_NAMES
+from ml.features import FEATURE_NAMES, TEMPORAL_FEATURE_NAMES
 from ml.label_windows import DEFAULT_OUTPUT, TARGET
 from ml.predict import probability
 
@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary", type=Path, default=DEFAULT_OUTPUT / "declaration_windows_summary.json")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT / "model")
     parser.add_argument("--holdout-date", help="UTC date to hold out; defaults to latest available date")
+    parser.add_argument("--feature-set", choices=("base", "temporal"), default="base")
     return parser.parse_args()
 
 
@@ -36,9 +37,12 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
             features = row.get("features")
             if not isinstance(features, dict) or tuple(features) != FEATURE_NAMES:
                 raise ValueError(f"Feature schema mismatch at {path}:{line_number}")
+            temporal = row.get("temporal_features")
+            if not isinstance(temporal, dict) or tuple(temporal) != TEMPORAL_FEATURE_NAMES:
+                raise ValueError(f"Temporal feature schema mismatch at {path}:{line_number}")
             if any(
                 isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
-                for value in features.values()
+                for value in (*features.values(), *temporal.values())
             ):
                 raise ValueError(f"Nonfinite feature at {path}:{line_number}")
             rows.append(row)
@@ -51,10 +55,11 @@ def group_weights(rows: list[dict[str, Any]]) -> list[float]:
     class_groups = Counter(label for _, _, label in counts)
     if set(class_groups) != {0, 1}:
         raise ValueError("Training split needs positive and negative aircraft-days")
-    return [
+    raw = [
         1.0 / (counts[(row["date_utc"], row["icao24"], row["label"])] * class_groups[row["label"]])
         for row in rows
     ]
+    return [weight * len(rows) / sum(raw) for weight in raw]
 
 
 def train(args: argparse.Namespace) -> dict[str, Any]:
@@ -71,6 +76,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     summary = json.loads(args.summary.read_text(encoding="utf-8"))
     if summary.get("target") != TARGET or summary.get("feature_names") != list(FEATURE_NAMES):
         raise ValueError("Dataset and summary schema disagree")
+    if summary.get("temporal_feature_names") != list(TEMPORAL_FEATURE_NAMES):
+        raise ValueError("Temporal dataset and summary schema disagree")
     dates = sorted({row["date_utc"] for row in rows})
     if len(dates) < 2:
         raise ValueError("At least two completed dates are required for a date-held-out evaluation")
@@ -83,8 +90,11 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     if not train_rows or not test or {row["label"] for row in train_rows} != {0, 1} or {row["label"] for row in test} != {0, 1}:
         raise ValueError("Both train and holdout must contain positives and negatives")
 
+    field = "features" if args.feature_set == "base" else "temporal_features"
+    names = FEATURE_NAMES if args.feature_set == "base" else TEMPORAL_FEATURE_NAMES
+
     def matrix(selected: list[dict[str, Any]]) -> list[list[float]]:
-        return [[float(row["features"][name]) for name in FEATURE_NAMES] for row in selected]
+        return [[float(row[field][name]) for name in names] for row in selected]
 
     x_train = matrix(train_rows)
     y_train = [row["label"] for row in train_rows]
@@ -99,7 +109,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     model = {
         "schema_version": 1,
         "target": TARGET,
-        "feature_names": list(FEATURE_NAMES),
+        "feature_names": list(names),
+        "feature_set": args.feature_set,
         "mean": scaler.mean_.tolist(),
         "scale": scaler.scale_.tolist(),
         "coefficients": estimator.coef_[0].tolist(),
@@ -111,7 +122,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "score_warning": "Score is a ranking score on an enriched aircraft-day sample, not a calibrated real-world emergency probability.",
     }
     export_difference = max(
-        abs(float(score) - probability(model, row["features"]))
+        abs(float(score) - probability(model, row[field]))
         for row, score in zip(test, scores)
     )
     if export_difference > 1e-9:
@@ -132,7 +143,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         "holdout_average_precision": float(average_precision_score(y_test, scores)),
         "holdout_window_positive_fraction": sum(y_test) / len(y_test),
         "export_max_abs_score_difference": export_difference,
-        "warning": "These window metrics are from three sampled days with correlated windows and enriched positives. They do not establish operational accuracy or calibrated risk.",
+        "warning": "August 2024 has already been inspected and is development data, not an untouched test. Correlated windows and enriched positives prevent operational accuracy or calibrated-risk claims.",
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "baseline_model.json").write_text(json.dumps(model, indent=2) + "\n", encoding="utf-8")

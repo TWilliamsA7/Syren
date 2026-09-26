@@ -6,8 +6,6 @@
 __pycache__/
 
 # Downloaded ADS-B traces, daily archive scratch files, and collection outputs
-data/
+data/*
 !data/README.md
-
-# Python Version
-.python-version
+!data/events.json
