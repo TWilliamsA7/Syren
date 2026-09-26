@@ -1,4 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import DeckGL from '@deck.gl/react';
+import Map from 'react-map-gl/maplibre'; // or 'react-map-gl' for Mapbox
+import { IconLayer } from '@deck.gl/layers';
+
 import './App.css';
 
 interface Aircraft {
@@ -32,94 +36,123 @@ interface Aircraft {
   timestamp?: string;
 }
 
-function App() {
-  // Raw JSON sample dataset representing live/historical US feeds
-  const mockApiResponse = {
-    "ac": [
-      {
-        "hex": "ac0094",
-        "type": "adsb_icao",
-        "flight": "SWA4400 ",
-        "r": "N8723Q",
-        "t": "B38M",
-        "alt_baro": 3275,
-        "alt_geom": 3400,
-        "gs": 208.8,
-        "track": 97.43,
-        "baro_rate": -1152,
-        "squawk": "3263",
-        "emergency": "none",
-        "category": "A3",
-        "nav_qnh": 1016.0,
-        "nav_altitude_mcp": 96,
-        "nav_heading": 187.73,
-        "lat": 27.812355,
-        "lon": -82.584862,
-        "messages": 220550,
-        "seen": 0.3,
-        "rssi": -9.8,
-        "dst": 76.910,
-        "dir": 241.5
-      },
-      {
-        "hex": "a23b55",
-        "type": "adsb_icao",
-        "flight": "MXY1606 ",
-        "r": "N243BZ",
-        "t": "BCS3",
-        "alt_baro": "ground",
-        "gs": 0.0,
-        "squawk": "4041",
-        "emergency": "none",
-        "category": "A3",
-        "lat": 27.975055,
-        "lon": -82.532730,
-        "messages": 8191,
-        "seen": 4.2,
-        "rssi": -23.8,
-        "dst": 70.106,
-        "dir": 247.4
-      },
-      {
-        "hex": "a7e93b",
-        "type": "adsb_icao",
-        "flight": "FFT2280 ",
-        "r": "N609FR",
-        "t": "A21N",
-        "alt_baro": 17675,
-        "alt_geom": 18600,
-        "gs": 408.4,
-        "track": 142.26,
-        "baro_rate": -2240,
-        "squawk": "5714",
-        "emergency": "none",
-        "category": "A3",
-        "messages": 80024,
-        "seen": 0.2,
-        "rssi": -21.3,
-        "dst": 49.257,
-        "dir": 320.7
-      }
-    ],
-    "msg": "No error",
-    "now": 1790400021000,
-    "total": 19420 // Simulated grand total across US Airspace for date
-  };
+const DEFAULT_VIEW_STATE = {
+  longitude: -95.7129,
+  latitude: 37.0902,
+  zoom: 4,
+  maxZoom: 18,
+  minZoom: 2,
+  pitch: 0,
+  bearing: 0
+};
 
-  const [aircraftList] = useState<Aircraft[]>(mockApiResponse.ac);
-  const [currentRegion, setCurrentRegion] = useState<'US_ALL' | 'US_WEST' | 'US_CENTRAL' | 'US_EAST'>('US_ALL');
+// Region specific view states for zooming buttons
+const REGION_VIEWS = {
+  US_ALL: { longitude: -95.7129, latitude: 37.0902, zoom: 4, pitch: 0, bearing: 0 },
+  US_WEST: { longitude: -120.5583, latitude: 40.5556, zoom: 4.7, pitch: 0, bearing: 0 },
+  US_MIDWEST: { longitude: -101.6298, latitude: 41.8781, zoom: 5, pitch: 0, bearing: 0 },
+  US_SOUTH: { longitude: -93.7970, latitude: 31.7767, zoom: 5.15, pitch: 0, bearing: 0 },
+  US_EAST: { longitude: -75.1652, latitude: 39.9526, zoom: 5, pitch: 0, bearing: 0 }
+};
+
+// Inline SVG Atlas for the plane icon with black outline/stroke
+const AIRPLANE_ICON = 'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="%2336F6B4" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';const ICON_MAPPING = {
+  marker: { x: 0, y: 0, width: 128, height: 128, mask: false }
+};
+
+function App() {
+  const [aircraftList, setAircraftList] = useState<Aircraft[]>([]);
+  const [isLive, setIsLive] = useState<boolean>(true);
+  const [lastUpdated, setLastUpdated] = useState<string>('Initializing...');
+  
+  const [currentRegion, setCurrentRegion] = useState<'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST'>('US_ALL');
+  const [viewState, setViewState] = useState(DEFAULT_VIEW_STATE);
   const [simState, setSimState] = useState<'running' | 'paused'>('running');
 
-  // Search state (Date is required, ICAO is optional)
+  // Search state
   const [searchDate, setSearchDate] = useState<string>('2026-09-26');
   const [searchIcao, setSearchIcao] = useState<string>('');
   
-  // View states: 'live' | 'search_result'
+  // View states
   const [viewMode, setViewMode] = useState<'live' | 'search_result'>('live');
   const [searchedAircraft, setSearchedAircraft] = useState<Aircraft | null>(null);
   const [searchError, setSearchError] = useState<string>('');
+  const [hoveredAircraft, setHoveredAircraft] = useState<Aircraft | null>(null);
 
-  // Handle Search Submission (Date is required)
+  const consecutiveFailuresRef = useRef<number>(0);
+
+  // Helper function to safely parse either JSON array or NDJSON (JSON Lines)
+  const parseJsonData = (text: string) => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Fallback for NDJSON / JSON Lines format
+      return text
+        .trim()
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(line => JSON.parse(line));
+    }
+  };
+
+  // Poll data file continuously
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+
+    const fetchData = async () => {
+      try {
+        const response = await fetch('/data.jsonl', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Failed to fetch data file');
+        
+        const rawText = await response.text();
+        const rawApiResponse = parseJsonData(rawText);
+
+        const parsedData: Aircraft[] = rawApiResponse.map((item: any) => ({
+          hex: item.icao24,
+          flight: item.flight_id,
+          type: item.aircraft?.type_code || 'adsb_icao',
+          t: item.aircraft?.type_code || undefined,
+          r: item.aircraft?.registration || undefined,
+          lat: item.position?.latitude,
+          lon: item.position?.longitude,
+          alt_baro: item.position?.altitude_baro_ft,
+          alt_geom: item.position?.altitude_geom_ft,
+          gs: item.kinematics?.ground_speed_kts,
+          track: item.kinematics?.track_deg,
+          baro_rate: item.kinematics?.vertical_rate_baro_fpm,
+          squawk: item.status?.squawk,
+          emergency: item.status?.emergency,
+          category: item.aircraft?.category,
+          timestamp: item.timestamp ? new Date(item.timestamp * 1000).toISOString() : new Date().toISOString()
+        }));
+
+        setAircraftList(parsedData);
+        setIsLive(true);
+        setLastUpdated(new Date().toUTCString());
+        consecutiveFailuresRef.current = 0;
+
+        // Schedule next standard check interval (1 second)
+        timer = setTimeout(fetchData, 1000);
+      } catch (err) {
+        consecutiveFailuresRef.current += 1;
+
+        if (consecutiveFailuresRef.current === 1) {
+          // First failure: Retry quickly 0.5 seconds later
+          timer = setTimeout(fetchData, 500);
+        } else {
+          // Subsequent failures: Mark as cooked/not live, but keep polling on interval
+          setIsLive(false);
+          timer = setTimeout(fetchData, 2000);
+        }
+      }
+    };
+
+    fetchData();
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Handle Search Submission
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     setSearchError('');
@@ -131,7 +164,6 @@ function App() {
 
     const query = searchIcao.trim().toLowerCase();
 
-    // If ICAO is provided, look for that specific plane
     if (query) {
       const found = aircraftList.find(
         a => 
@@ -142,8 +174,15 @@ function App() {
 
       if (found) {
         setSearchedAircraft({ ...found, timestamp: searchDate });
+        if (found.lat && found.lon) {
+          setViewState(v => ({
+            ...v,
+            longitude: found.lon!,
+            latitude: found.lat!,
+            zoom: 9
+          }));
+        }
       } else {
-        // Fallback generator for demonstration if searching outside current sample slice
         setSearchedAircraft({
           hex: query.toUpperCase(),
           type: 'adsb_icao',
@@ -159,13 +198,12 @@ function App() {
           category: 'A3',
           messages: 45100,
           rssi: -14.2,
-          lat: 34.05,
-          lon: -118.24,
+          lat: 27.97,
+          lon: -82.53,
           timestamp: searchDate
         });
       }
     } else {
-      // Date only: Show aggregate daily feed stats
       setSearchedAircraft(null);
     }
 
@@ -179,8 +217,48 @@ function App() {
     setSearchError('');
   };
 
-  const utcTimestamp = new Date(mockApiResponse.now).toUTCString();
+  const handleRegionChange = (region: 'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST') => {
+    setCurrentRegion(region);
+    setViewState(v => ({
+      ...v,
+      ...REGION_VIEWS[region]
+    }));
+    if (viewMode !== 'live') {
+      returnToLive();
+    }
+  };
+
   const hasFeedAnomaly = aircraftList.some(a => a.emergency && a.emergency !== 'none');
+
+  // Define Deck.GL Layers for Aircraft visualization mapped to geo coordinates
+  const layers = [
+    new IconLayer({
+      id: 'aircraft-icon-layer',
+      data: viewMode === 'live' 
+        ? aircraftList 
+        : (searchedAircraft ? [searchedAircraft] : aircraftList),
+      iconAtlas: AIRPLANE_ICON,
+      iconMapping: ICON_MAPPING,
+      getIcon: () => 'marker',
+      getPosition: (d: Aircraft) => [d.lon ?? -95.7129, d.lat ?? 37.0902],
+      getSize: 24,
+      // Fix: Negate the angle because Deck.GL rotates counter-clockwise, 
+      // while aviation headings are clockwise (0-360).
+      getAngle: (d: any) => {
+        const rawHeading = d.true_heading ?? d.nav_heading ?? d.heading ?? d.track ?? 0;
+        return -rawHeading; 
+      },
+      getColor: (d: Aircraft) => 
+        (d.emergency && d.emergency !== 'none') ? [244, 63, 94] : [54, 246, 180],
+      pickable: true,
+      onHover: info => setHoveredAircraft(info.object as Aircraft || null),
+      updateTriggers: {
+        data: [aircraftList, searchedAircraft, viewMode],
+        // Added updateTriggers so it recalculates angles smoothly if data updates
+        getAngle: [aircraftList, searchedAircraft, viewMode] 
+      }
+    })
+  ];
 
   return (
     <div className="syren-container">
@@ -189,23 +267,22 @@ function App() {
       <header className="syren-header">
         <div style={{ display: 'flex', alignItems: 'baseline', gap: '1rem' }}>
           <h1 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.5rem', fontWeight: '800', letterSpacing: '-0.025em' }}>
-            SYREN <span style={{ color: 'var(--accent)', alignItems: 'center', fontSize: '0.875rem', fontWeight: '400' }}>// Edge Aviation Crisis Engine</span>
+            SYREN <span style={{ color: 'var(--accent)', fontSize: '0.875rem', fontWeight: '400' }}>// Edge Aviation Crisis Engine</span>
           </h1>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: '1rem' }}>
             {viewMode === 'live' 
-              ? '🟢 ADS-B Live US Airspace Feed' 
-              : searchedAircraft ? `🔍 Historical Archive: ICAO [${searchedAircraft.hex}] (${searchDate})` : `📅 US Airspace Aggregate (${searchDate})`}
+              ? 'ADS-B Live US Airspace Feed' 
+              : searchedAircraft ? `Historical Archive: ICAO [${searchedAircraft.hex}] (${searchDate})` : `US Airspace Aggregate (${searchDate})`}
           </span>
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          {/* Always accessible live toggle button */}
           <button 
             onClick={returnToLive}
             style={{ 
-              backgroundColor: viewMode === 'live' ? 'rgba(54, 246, 180, 0.15)' : 'var(--accent)', 
-              color: viewMode === 'live' ? 'var(--green)' : 'var(--text-main)', 
-              border: viewMode === 'live' ? '1px solid var(--green)' : 'none', 
+              backgroundColor: isLive ? 'rgba(54, 246, 180, 0.15)' : 'rgba(244, 63, 94, 0.15)', 
+              color: isLive ? 'var(--green)' : 'var(--red)', 
+              border: `1px solid ${isLive ? 'var(--green)' : 'var(--red)'}`, 
               padding: '0.375rem 0.75rem', 
               borderRadius: '0.375rem', 
               fontWeight: '700', 
@@ -215,8 +292,8 @@ function App() {
               alignItems: 'center',
               gap: '0.35rem'
             }}>
-            <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: viewMode === 'live' ? 'var(--green)' : '#0F172A' }}></span>
-            {viewMode === 'live' ? 'Live Feed Active' : 'Return to Live'}
+            <span style={{ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: isLive ? 'var(--green)' : 'var(--red)' }}></span>
+            {isLive ? 'Live Feed Active' : "IT'S COOKED - NOT LIVE ANYMORE"}
           </button>
 
           <button 
@@ -230,70 +307,72 @@ function App() {
       {/* Workspace Grid */}
       <div className="syren-workspace">
         
-        {/* Left Side: Map with Regional Zoom */}
-        <div className="map-placeholder">
-          <div className="map-grid-bg" />
+        {/* Left Side: Coordinate-mapped Deck.GL Map Canvas & Earth Background */}
+        <div className="map-placeholder" style={{ position: 'relative', overflow: 'hidden' }}>
+      
 
-          {/* Earth Image Background Placeholder */}
-          <img 
-            src="/earth.jpg" 
-            alt="Earth Globe" 
-            style={{ 
-              position: 'absolute', 
-              inset: 0, 
-              width: '100%', 
-              height: '100%', 
-              objectFit: 'fill', 
-              opacity: 1.0, 
-              zIndex: 0,
-              filter: 'contrast(1.2) brightness(0.8)' 
-            }} 
-          />
+          <div className="map-grid-bg" style={{ zIndex: 1, pointerEvents: 'none' }} />
+
+          {/* Deck.GL Canvas Integration with Geographic Coordinate mapping */}
+          <DeckGL
+            viewState={viewState}
+            onViewStateChange={(e: any) => setViewState(e.viewState)}
+            controller={true}
+            layers={layers}
+            style={{ position: 'absolute', inset: 0, zIndex: 2 }}
+          >
+            <Map
+              reuseMaps
+              mapStyle="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+            />
+          </DeckGL>
+
+          {/* Hover Tooltip Overlay */}
+          {hoveredAircraft && (
+            <div style={{
+              position: 'absolute',
+              bottom: '2rem',
+              left: '2rem',
+              backgroundColor: 'rgba(15, 23, 42, 0.9)',
+              border: '1px solid var(--accent)',
+              padding: '0.75rem 1rem',
+              borderRadius: '0.5rem',
+              zIndex: 30,
+              fontSize: '0.75rem',
+              color: 'var(--text-main)',
+              pointerEvents: 'none',
+              backdropFilter: 'blur(4px)'
+            }}>
+              <div>Flight: <strong style={{ color: 'var(--accent)' }}>{hoveredAircraft.flight?.trim() || 'N/A'}</strong> ({hoveredAircraft.hex})</div>
+              <div>Alt: <strong>{hoveredAircraft.alt_baro} ft</strong> | GS: <strong>{hoveredAircraft.gs} kts</strong></div>
+              <div>Squawk: <strong style={{ color: 'var(--green)' }}>{hoveredAircraft.squawk || 'N/A'}</strong></div>
+            </div>
+          )}
 
           {/* Region Zoom Toolbar */}
-          <div className="map-toolbar">
+          <div className="map-toolbar" style={{ zIndex: 20 }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '0.25rem' }}>Region Zoom:</span>
-            <button className={currentRegion === 'US_ALL' ? 'active' : ''} onClick={() => { setCurrentRegion('US_ALL'); if(viewMode !== 'live') returnToLive(); }}>Continental US</button>
-            <button className={currentRegion === 'US_WEST' ? 'active' : ''} onClick={() => { setCurrentRegion('US_WEST'); if(viewMode !== 'live') returnToLive(); }}>West Coast</button>
-            <button className={currentRegion === 'US_CENTRAL' ? 'active' : ''} onClick={() => { setCurrentRegion('US_CENTRAL'); if(viewMode !== 'live') returnToLive(); }}>Central US</button>
-            <button className={currentRegion === 'US_EAST' ? 'active' : ''} onClick={() => { setCurrentRegion('US_EAST'); if(viewMode !== 'live') returnToLive(); }}>East Coast</button>
+            <button className={currentRegion === 'US_ALL' ? 'active' : ''} onClick={() => handleRegionChange('US_ALL')}>Continental US</button>
+            <button className={currentRegion === 'US_WEST' ? 'active' : ''} onClick={() => handleRegionChange('US_WEST')}>West Coast</button>
+            <button className={currentRegion === 'US_MIDWEST' ? 'active' : ''} onClick={() => handleRegionChange('US_MIDWEST')}>Midwest US</button>
+            <button className={currentRegion === 'US_SOUTH' ? 'active' : ''} onClick={() => handleRegionChange('US_SOUTH')}>South US</button>
+            <button className={currentRegion === 'US_EAST' ? 'active' : ''} onClick={() => handleRegionChange('US_EAST')}>East Coast</button>
           </div>
 
-          {/* Map Center Placeholder */}
-          <div style={{ zIndex: 10, textAlign: 'center', padding: '2rem' }}>
-            <div style={{ fontSize: '1.25rem', fontWeight: '700', color: 'var(--accent)', marginBottom: '0.5rem' }}>
-              {viewMode === 'live' 
-                ? `ADS-B Live US Airspace (${currentRegion.replace('_', ' ')})` 
-                : searchedAircraft 
-                  ? `Target Tracking: ${searchedAircraft.flight?.trim() || searchedAircraft.hex} (${searchDate})` 
-                  : `US National Airspace Archive (${searchDate})`}
-            </div>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', maxWidth: '450px', margin: '0 auto 1.5rem auto' }}>
-              {viewMode === 'live' 
-                ? 'Streaming real-time normalized US flight vectors over WebSocket /ws/state.' 
-                : searchedAircraft 
-                  ? `Locked onto ICAO Hex [${searchedAircraft.hex}] at Lat: ${searchedAircraft.lat}, Lon: ${searchedAircraft.lon}`
-                  : `Displaying aggregate daily traffic metrics and anomaly statuses for ${searchDate}.`}
-            </p>
-            <div style={{ display: 'inline-flex', gap: '1.5rem', backgroundColor: 'var(--bg-sidebar)', padding: '0.75rem 1.25rem', borderRadius: '0.5rem', border: '1px solid var(--border)' }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8125rem' }}>
-                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: 'var(--green)' }}></span> 
-                {searchedAircraft 
-                  ? `Status: ${searchedAircraft.emergency === 'none' ? 'Nominal' : 'EMERGENCY'}` 
-                  : `Total Active Flights (${searchDate}): ${mockApiResponse.total.toLocaleString()}`}
-              </span>
-            </div>
+          {/* Map Status Badge */}
+          <div style={{ position: 'absolute', bottom: '1.5rem', right: '1.5rem', zIndex: 20, backgroundColor: 'rgba(15, 23, 42, 0.85)', padding: '0.5rem 1rem', borderRadius: '0.375rem', border: '1px solid var(--border)', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+            Deck.GL Active Layer Rendering ({aircraftList.length} entities)
           </div>
         </div>
 
         {/* Right Side: Sidebar (Search & Feed Information) */}
         <div className="sidebar">
           
-          {/* Historical Search Box (Date Required, ICAO Optional) */}
+          {/* Historical Search Box */}
           <div className="search-box">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
               <div style={{ fontSize: '0.8125rem', fontWeight: '700', color: 'var(--accent)' }}>
-                🔍 Date & Optional ICAO Search
+                Date & Optional ICAO Search
               </div>
               {viewMode === 'search_result' && (
                 <button 
@@ -334,20 +413,17 @@ function App() {
             </form>
           </div>
 
-          {/* VIEW MODE 1: LIVE FEED OR DATE SEARCH WITHOUT ICAO (Shows Total Flights + Anomaly Status + Metadata) */}
+          {/* VIEW MODE 1: LIVE FEED */}
           {(!searchedAircraft) && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
-              
-              {/* Total Flights Card */}
               <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem' }}>
                 <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>
                   {viewMode === 'live' ? 'Current US Airspace Volume' : `Recorded Volume (${searchDate})`}
                 </div>
-                <div style={{ fontSize: '2rem', fontWeight: '800', color: 'var(--accent)' }}>{mockApiResponse.total.toLocaleString()}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active transponders reporting via ADS-B</div>
+                <div style={{ fontSize: '2rem', fontWeight: '800', color: 'var(--accent)' }}>{aircraftList.length.toLocaleString()}</div>
+                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active transponders rendering on Deck.GL</div>
               </div>
 
-              {/* Feed Anomaly Status Card */}
               <div style={{ 
                 backgroundColor: 'var(--bg-sidebar)', 
                 border: `1px solid ${hasFeedAnomaly ? 'var(--red)' : 'var(--green)'}`, 
@@ -364,34 +440,29 @@ function App() {
                 </p>
               </div>
 
-              {/* Timestamps & Metadata Card */}
               <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem', fontSize: '0.8125rem' }}>
                 <div style={{ fontWeight: '700', color: 'var(--text-main)', marginBottom: '0.75rem' }}>Telemetry System Metadata</div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>
                   <span>Query Timestamp:</span>
-                  <strong style={{ color: 'var(--text-main)' }}>{viewMode === 'live' ? utcTimestamp : `${searchDate} 00:00:00 UTC`}</strong>
+                  <strong style={{ color: 'var(--text-main)' }}>{lastUpdated}</strong>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>
                   <span>API Status:</span>
-                  <strong style={{ color: 'var(--green)' }}>{mockApiResponse.msg}</strong>
+                  <strong style={{ color: isLive ? 'var(--green)' : 'var(--red)' }}>
+                    {isLive ? 'No error' : 'COOKED (Offline)'}
+                  </strong>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
                   <span>Sample Slice Size:</span>
                   <strong style={{ color: 'var(--text-main)' }}>{aircraftList.length} local packets</strong>
                 </div>
               </div>
-
-              <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: '1rem' }}>
-                💡 Tip: To inspect a specific plane, enter a date and type an ICAO hex or callsign (e.g., <code style={{ color: 'var(--accent)' }}>ac0094</code>).
-              </div>
-
             </div>
           )}
 
-          {/* VIEW MODE 2: DATE + ICAO SEARCHED (Shows Deep Dive Single Aircraft Telemetry & Removes Total Flights) */}
+          {/* VIEW MODE 2: SEARCHED AIRCRAFT */}
           {searchedAircraft && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, overflowY: 'auto' }}>
-              
               <div style={{ 
                 backgroundColor: 'var(--bg-sidebar)', 
                 border: `1px solid ${searchedAircraft.emergency !== 'none' ? 'var(--red)' : 'var(--accent)'}`, 
@@ -425,16 +496,7 @@ function App() {
                   <div>Track / Heading: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.track ?? searchedAircraft.nav_heading ?? 'N/A'}°</strong></div>
                   <div>Baro Rate: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.baro_rate ?? 0} fpm</strong></div>
                   <div>Squawk Code: <strong style={{ color: 'var(--green)' }}>{searchedAircraft.squawk || 'N/A'}</strong></div>
-                  <div>Signal RSSI: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.rssi ?? 'N/A'} dB</strong></div>
-                  <div>Total Packets: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.messages?.toLocaleString() || 'N/A'}</strong></div>
                 </div>
-
-                {searchedAircraft.nav_qnh && (
-                  <div style={{ marginTop: '1rem', backgroundColor: '#0F172A', padding: '0.75rem', borderRadius: '0.375rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    <div>Nav QNH: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.nav_qnh} hPa</strong></div>
-                    <div>Nav MCP Altitude: <strong style={{ color: 'var(--text-main)' }}>{searchedAircraft.nav_altitude_mcp} meters</strong></div>
-                  </div>
-                )}
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
                   <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Archived Date: <strong>{searchDate}</strong></span>
@@ -445,7 +507,6 @@ function App() {
                   </button>
                 </div>
               </div>
-
             </div>
           )}
 
