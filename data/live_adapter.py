@@ -80,7 +80,7 @@ if __name__ == "__main__":
         while True:
             start_time = time.time()
             try:
-                states = fetch_live(ADSB_LOL_URL, 28.4, -81.3, 100)
+                states = fetch_live(ADSB_LOL_URL, 38.0, -96.0, 1450)
                 
                 # Write atomically or directly to the target file path
                 with open(out_path, "w") as out:
