@@ -1,35 +1,37 @@
 {
-  "timestamp": 1727300123.25,          // when the position was measured, Unix seconds UTC | live: resp["now"]/1000 - ac["seen_pos"] | history: file["timestamp"] + point[0]
-  "icao24": "a1b2c3",                  // aircraft's permanent transponder ID, use this to match records | live: ac["hex"] | history: file["icao"]
-  "flight_id": "UAL1842",              // flight callsign, falls back to icao24 if missing | live: ac["flight"] | history: point[8]["flight"], reuse last one if null
+  "timestamp": 1790400021.0,           // when the position was measured, Unix seconds | live: now/1000 - seen_pos | history: file timestamp + point[0]
+  "icao24": "a5d28c",                  // permanent transponder ID, the join key | live: hex | history: file icao
+  "flight_id": "UAL3776",              // callsign, spaces stripped, falls back to icao24 | live: flight | history: point[8].flight, reuse last
   "aircraft": {
-    "registration": "N37522",          // tail number painted on the plane | live: ac["r"] | history: file["r"]
-    "type_code": "B38M",               // aircraft model code, B38M = Boeing 737 MAX 8 | live: ac["t"] | history: file["t"]
-    "category": "A3"                   // size class, A1 light ... A3 large ... A5 heavy | live: ac["category"] | history: point[8]["category"], reuse last one if null
+    "registration": "N47412",          // tail number | live: r | history: file r
+    "type_code": "B39M",               // model code, B39M = 737 MAX 9 | live: t | history: file t
+    "category": "A3"                   // size class A1 light, A3 large, A4 heavy, A7 rotorcraft | live: category | history: point[8].category, reuse last
   },
   "position": {
-    "latitude": 28.43,                 // GPS latitude in degrees, positive = north | live: ac["lat"] | history: point[1]
-    "longitude": -81.31,               // GPS longitude in degrees, negative = west | live: ac["lon"] | history: point[2]
-    "altitude_baro_ft": 31000,         // altitude from air pressure in feet, what ATC uses | live: ac["alt_baro"] | history: point[3]
-    "altitude_geom_ft": 31240,         // altitude from GPS in feet, closer to true height | live: ac["alt_geom"] | history: point[10]
-    "on_ground": false,                // true when the plane is on the ground | live: ac["alt_baro"] == "ground" | history: point[3] == "ground"
-    "source": "adsb_icao",             // adsb_icao = plane's own GPS, mlat = estimated by ground receivers (less accurate) | live: ac["type"] | history: point[9]
-    "stale": false                     // true if no position was heard for 20+ seconds before this one | live: ac["seen_pos"] > 20 | history: point[6] & 1
+    "latitude": 28.848358,             // GPS latitude, degrees | live: lat | history: point[1]
+    "longitude": -82.270907,           // GPS longitude, degrees | live: lon | history: point[2]
+    "altitude_baro_ft": 14850,         // pressure altitude, ft, what ATC uses | live: alt_baro | history: point[3]
+    "altitude_geom_ft": 15575,         // GPS altitude, ft, can read above or below baro | live: alt_geom | history: point[10]
+    "on_ground": false,                // true when parked or taxiing | live: alt_baro == "ground" | history: point[3] == "ground"
+    "source": "adsb_icao",             // adsb_icao = aircraft's own broadcast, adsr_icao = rebroadcast (no accuracy data), mlat = ground-estimated | live: type | history: point[9]
+    "accuracy_m": 186,                 // position accuracy radius, smaller is better, null when unknown | live: rc (0 means unknown) | history: not stored
+    "stale": false                     // true if no position heard for 20+ s before this | live: seen_pos > 20 | history: point[6] & 1
   },
   "kinematics": {
-    "ground_speed_kts": 465.0,         // speed over the ground in knots, affected by wind | live: ac["gs"] | history: point[4]
-    "track_deg": 247.0,                // direction of travel in degrees, 0 = north, 90 = east | live: ac["track"] | history: point[5]
-    "vertical_rate_baro_fpm": -128,    // climb (+) or descent (-) in feet per minute, from air pressure | live: ac["baro_rate"] | history: point[7]
-    "vertical_rate_geom_fpm": -128,    // climb (+) or descent (-) in feet per minute, from GPS | live: ac["geom_rate"] | history: point[11]
-    "ias_kts": 285,                    // airspeed through the air in knots, not affected by wind, often missing in the US | live: ac["ias"] | history: point[12]
-    "roll_deg": -0.4                   // bank angle in degrees, negative = banking left, often missing in the US | live: ac["roll"] | history: point[13]
+    "ground_speed_kts": 423.2,         // speed over the ground, knots, includes wind | live: gs | history: point[4]
+    "track_deg": 174.17,               // direction of travel, degrees, 0 = north | live: track, or true_heading when on the ground | history: point[5]
+    "vertical_rate_baro_fpm": -2560,   // climb (+) or descent (-), ft/min, from pressure, preferred | live: baro_rate | history: point[7]
+    "vertical_rate_geom_fpm": null     // same from GPS, the only rate some aircraft send, use as fallback | live: geom_rate | history: point[11]
+  },
+  "nav": {
+    "selected_altitude_ft": 12992      // altitude the crew dialed into the autopilot, null if not sent | live: nav_altitude_mcp | history: point[8].nav_altitude_mcp
   },
   "status": {
-    "squawk": "4521",                  // 4-digit code set by the pilot, 7700 = emergency, 7600 = radio failure, 7500 = hijack | live: ac["squawk"] | history: point[8]["squawk"], reuse last one if null
-    "emergency": "none",               // declared emergency: none, general, lifeguard, minfuel, nordo, unlawful, downed | live: ac["emergency"] | history: point[8]["emergency"], reuse last one if null
-    "seen_age_s": 0.8                  // seconds since the last position was heard, growing = losing contact | live: ac["seen_pos"] | history: always null
+    "squawk": "3456",                  // ATC code, 7700 emergency, 7600 radio failure, 7500 hijack | live: squawk | history: point[8].squawk, reuse last
+    "emergency": "none",               // none, general, lifeguard, minfuel, nordo, unlawful, downed | live: emergency | history: point[8].emergency, reuse last
+    "seen_age_s": 0.487                // seconds since the last position, growing = losing contact | live: seen_pos | history: null
   },
-  "origin": "live"                     // where this record came from: live, history, or sim, for debugging only
+  "origin": "live"                     // live, history, or sim, debugging only, detector must ignore
 }
 
 {
