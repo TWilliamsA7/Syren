@@ -1,6 +1,7 @@
 import json
 import sys
 import urllib.request
+import time
 
 from shared.flight_state import make_flight_state, validate_flight_state
 
@@ -67,19 +68,30 @@ def fetch_live(api_url, lat, lon, radius_nm, timeout_s=10):
     return parse_response(data)
 
 if __name__ == "__main__":
-    states = fetch_live(ADSB_LOL_URL, 28.4, -81.3, 100)
-    out_path = sys.argv[1] if len(sys.argv) > 1 else None
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "public/data.jsonl"
+    print(f"Starting continuous live feed loop targeting: {out_path} (every 5s)...")
 
-    out = open(out_path, "w") if out_path else None
-    for state in states:
-        errors = validate_flight_state(state)
-        if errors:
-            print(state["icao24"], errors)
-        if out:
-            out.write(json.dumps(state) + "\n")
-        else:
-            print(state["flight_id"], state["position"]["altitude_baro_ft"],
-                  state["kinematics"]["ground_speed_kts"])
-    if out:
-        out.close()
-    print(f"{len(states)} FlightStates")
+    try:
+        while True:
+            start_time = time.time()
+            try:
+                states = fetch_live(ADSB_LOL_URL, 28.4, -81.3, 100)
+                
+                # Write atomically or directly to the target file path
+                with open(out_path, "w") as out:
+                    for state in states:
+                        errors = validate_flight_state(state)
+                        if not errors:
+                            out.write(json.dumps(state) + "\n")
+                            
+                print(f"[{time.strftime('%H:%M:%S')}] Updated {out_path} with {len(states)} FlightStates")
+            except Exception as e:
+                print(f"[{time.strftime('%H:%M:%S Fehler')}] Error fetching/writing live data: {e}", file=sys.stderr)
+
+            # Sleep for the remainder of the 2-second window
+            elapsed = time.time() - start_time
+            sleep_time = max(5.0, 5.0 - elapsed)
+            time.sleep(sleep_time)
+
+    except KeyboardInterrupt:
+        print("\nLive feed loop stopped by user.")
