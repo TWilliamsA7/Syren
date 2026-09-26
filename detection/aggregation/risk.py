@@ -1,21 +1,21 @@
-"""Schema-neutral risk aggregation extension point; policy is not selected yet."""
+"""Prototype risk aggregation for DetectionResult anomalies.
+
+The noisy-OR combination is a transparent hackathon heuristic, not a calibrated
+probability. Multiple high-severity signals raise risk while the score remains
+bounded in [0, 1].
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol
+from detection.models import Anomaly
 
 
-class WeightedSignal(Protocol):
-    """Minimum internal view an eventual aggregation policy may require."""
-
-    @property
-    def severity(self) -> float: ...
-
-    @property
-    def weight(self) -> float: ...
-
-
-def combine_prototype_risk(signals: Iterable[WeightedSignal]) -> float | None:
-    """TODO: choose and document aggregation semantics after signal schema agreement."""
-    raise NotImplementedError("risk aggregation policy has not been agreed")
+def combine_prototype_risk(signals: Iterable[Anomaly]) -> float:
+    """Combine anomaly severities with noisy-OR; no signals yield zero risk."""
+    remaining_risk = 1.0
+    for signal in signals:
+        if not 0.0 <= signal.severity <= 1.0:
+            raise ValueError("anomaly severity must be in [0, 1]")
+        remaining_risk *= 1.0 - signal.severity
+    return 1.0 - remaining_risk
