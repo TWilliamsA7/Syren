@@ -7,9 +7,11 @@ import tarfile
 import tempfile
 import threading
 import time
+import datetime
 
 from data.history import (
-    days_on_disk, find_release, setup_fixed_days, start_swap, swap_day, swap_status, trace_path,
+    available_range, days_on_disk, find_release, setup_fixed_days, start_swap, swap_day,
+    swap_status, trace_path,
 )
 
 TRACES = {
@@ -91,25 +93,33 @@ def test_swap_to_a_day_on_disk_downloads_nothing():
         assert days_on_disk(root) == {"fixed": ["2026-09-24"], "swap": "2026-09-20"}
 
 
-def test_unknown_date_keeps_old_swap_day():
+def test_unreleased_date_keeps_old_swap_day():
     def not_released(date):
         raise LookupError(f"no adsb.lol history release found for {date}")
 
     with tempfile.TemporaryDirectory() as root:
         swap_day("2026-09-20", root, find=lambda date: fake_release(root))
         try:
-            swap_day("2010-01-01", root, find=not_released)
+            swap_day("2026-09-19", root, find=not_released)
         except LookupError:
             pass
         assert days_on_disk(root)["swap"] == "2026-09-20"
 
 
-def test_bad_date():
-    try:
-        swap_day("2026-13-45", find=no_download)
-    except ValueError:
-        return
-    assert False, "a malformed date should raise ValueError"
+def test_available_range():
+    first, last = available_range()
+    yesterday = datetime.datetime.now(datetime.timezone.utc).date() - datetime.timedelta(days=1)
+    assert first == "2023-02-16"
+    assert last == yesterday.isoformat()
+
+
+def test_dates_outside_the_archive_are_rejected():
+    for date in ("2026-13-45", "20260924", "2010-01-01", "2023-02-15", "2099-01-01"):
+        try:
+            swap_day(date, find=no_download)
+            assert False, f"{date} should be rejected"
+        except ValueError:
+            pass
 
 
 def test_start_swap_in_background():
@@ -149,15 +159,10 @@ def test_failed_swap_is_reported():
 
 
 def check_live_releases():
-    parts = find_release("2026-09-24")
-    print(f"2026-09-24: {len(parts)} parts, {sum(size for _, size in parts) / 1e9:.1f} GB")
-    parts = find_release("2023-06-01")
-    print(f"2023-06-01: {len(parts)} part(s), {sum(size for _, size in parts) / 1e9:.1f} GB")
-    try:
-        find_release("2010-01-01")
-        print("FAIL 2010-01-01 should not exist")
-    except LookupError:
-        print("2010-01-01: not found, as expected")
+    for date in ("2026-09-24", "2024-01-01", "2023-02-20"):
+        parts = find_release(date)
+        tag = parts[0][0].rsplit("/", 1)[1].split(".tar")[0]
+        print(f"{date}: {tag}, {len(parts)} part(s), {sum(size for _, size in parts) / 1e9:.1f} GB")
 
 
 if __name__ == "__main__":
@@ -165,8 +170,9 @@ if __name__ == "__main__":
     test_setup_fixed_days()
     test_swap_replaces_only_the_swap_day()
     test_swap_to_a_day_on_disk_downloads_nothing()
-    test_unknown_date_keeps_old_swap_day()
-    test_bad_date()
+    test_unreleased_date_keeps_old_swap_day()
+    test_available_range()
+    test_dates_outside_the_archive_are_rejected()
     test_start_swap_in_background()
     test_one_swap_at_a_time()
     test_failed_swap_is_reported()
