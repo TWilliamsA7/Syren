@@ -262,3 +262,24 @@ missed-event IDs, and control alert examples are in
 `data/learning/ten_day_development/positive_pattern_pilot/pilot_2026-05-15.json`.
 The raw casebook is in the same directory. All ten dates are development data,
 and repeated exploratory use of them limits generalization claims.
+
+# Context-matched pattern follow-up
+
+`python -m ml.contextual_pattern_pilot` reviews the 127 control alerts from the
+prior pilot, then scores each named behavior by its rarity among training
+controls in a comparable flight phase, altitude band, speed band, and aircraft
+type when enough controls exist. It samples control windows per aircraft-day,
+purges held-out aircraft, discovers cutoffs using positive event peaks on nine
+dates, and replays 2024-11-15 once. The pilot reports each pattern and their
+union without imposing a false-alert cap. Its output is
+`data/learning/ten_day_development/contextual_pattern_pilot/pilot_2024-11-15.json`.
+
+The prior false alerts were mostly level-flight observations (83 of 127), with
+a median reversal of only 125 feet. Context matching did **not** improve the
+warning tradeoff: none of 27 candidate cutoffs reached twofold event enrichment
+over matched control alerts on the training dates. On the new replay date, the
+original 100-foot reversal rule warned 7 of 17 events with 129 control alerts
+in 177.0 hours (729 per 1,000 hours); the context-matched patterns caught fewer
+events at similar rates. This follow-up remains research-only. The weak
+controls and repeated development-date analysis still prevent future-date
+performance claims.
