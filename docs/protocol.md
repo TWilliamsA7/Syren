@@ -31,6 +31,7 @@
     "emergency": "none",               // none, general, lifeguard, minfuel, nordo, unlawful, downed | live: emergency | history: point[8].emergency, reuse last
     "seen_age_s": 0.487                // seconds since the last position, growing = losing contact | live: seen_pos | history: null
   },
+  "anomaly": "none",                   // filled in by the AI model for the UI: none, engine_failure, aggressive_near_ground_speed, accelerating_descent, incoming_aircraft_collision, altitude_anomaly, squawk, heading_anomaly, heading_oscillation, route_deviation, signal_loss | live, history, sim: always "none", detector must ignore it on input
   "origin": "live"                     // live, history, or sim, debugging only, detector must ignore
 }
 
@@ -42,7 +43,7 @@
   "severity": "warning",               // risk as a label: normal < 0.30, advisory < 0.60, warning < 0.85, critical above
   "anomalies": [                       // one entry per problem found, empty if nothing is wrong
     {
-      "type": "RAPID_DESCENT",         // what kind of problem, from a fixed list the UI knows
+      "type": "accelerating_descent",  // what kind of problem, any FlightState anomaly value except none
       "severity": 0.82,                // how confident this one check is, from 0 to 1
       "message": "Descent rate -4200 fpm (baro)"  // text for the alert card, includes the actual number that triggered it
     }

@@ -4,4 +4,8 @@
 # Python
 __pycache__/
 *.pyc
+
+
+data/generated/
+data/archive/
 node_modules

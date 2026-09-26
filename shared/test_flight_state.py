@@ -48,6 +48,8 @@ INVALID_CASES = [
     ("non-octal squawk", lambda s: s["status"].update(squawk="7800")),
     ("short squawk", lambda s: s["status"].update(squawk="770")),
     ("squawk as emergency", lambda s: s["status"].update(emergency="7700")),
+    ("unknown anomaly", lambda s: s.update(anomaly="hijack")),
+    ("missing anomaly", lambda s: s.pop("anomaly")),
     ("unknown origin", lambda s: s.update(origin="fake")),
     ("unknown source", lambda s: s["position"].update(source="radar")),
     ("track 360", lambda s: s["kinematics"].update(track_deg=360)),
