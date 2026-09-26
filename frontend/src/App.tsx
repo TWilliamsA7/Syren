@@ -188,8 +188,8 @@ function App() {
       {/* Top Header */}
       <header className="syren-header">
         <div style={{ display: 'flex', alignItems: 'baseline', gap: '1rem' }}>
-          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: '800', letterSpacing: '-0.025em' }}>
-            SYREN <span style={{ color: 'var(--accent)', fontSize: '0.875rem', fontWeight: '400' }}>// Edge Aviation Crisis Engine</span>
+          <h1 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.5rem', fontWeight: '800', letterSpacing: '-0.025em' }}>
+            SYREN <span style={{ color: 'var(--accent)', alignItems: 'center', fontSize: '0.875rem', fontWeight: '400' }}>// Edge Aviation Crisis Engine</span>
           </h1>
           <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', borderLeft: '1px solid var(--border)', paddingLeft: '1rem' }}>
             {viewMode === 'live' 
