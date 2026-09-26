@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from ml.features import FEATURE_NAMES, TEMPORAL_FEATURE_NAMES, extract_features, extract_temporal_features
+from ml.sequence_features import CHANNEL_NAMES, resample_sequence
 from scripts.collect_adsb_days import inspect_trace
 from scripts.fetch_event_traces import TraceError, load_raw_trace, trace_points
 
@@ -27,6 +28,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_COLLECTION = ROOT / "data" / "collection"
 DEFAULT_OUTPUT = ROOT / "data" / "learning"
 TARGET = "first_observed_adsb_emergency_declaration"
+EPISODE_TARGET = "future_adsb_declaration_episode_multilabel_2_to_10_minutes"
+SUPPORTED_SUBTYPE_HEADS = (
+    "emergency_field:general",
+    "emergency_field:nordo",
+    "emergency_squawk:7700",
+    "emergency_squawk:7600",
+)
+USABLE_STATUSES = {"general", "minfuel", "nordo", "unlawful", "downed"}
+USABLE_SQUAWKS = {"7700", "7600", "7500"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +50,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride-seconds", type=float, default=60)
     parser.add_argument("--max-gap-seconds", type=float, default=120)
     parser.add_argument("--min-points", type=int, default=10)
+    parser.add_argument(
+        "--episode-target", action="store_true",
+        help="write the separate time-clustered, subtype-multilabel research dataset",
+    )
     return parser.parse_args()
 
 
@@ -143,11 +157,52 @@ def checked_trace(record: dict[str, Any], collection_dir: Path, positive_manifes
     return points, event_time
 
 
+def usable_subtype(signal: dict[str, Any]) -> str | None:
+    kind = signal.get("signal")
+    value = str(signal.get("value", "")).lower()
+    if kind == "emergency_field" and value in USABLE_STATUSES:
+        return f"emergency_field:{value}"
+    if kind == "emergency_squawk" and value in USABLE_SQUAWKS:
+        return f"emergency_squawk:{value}"
+    return None
+
+
+def build_signal_episodes(
+    usable_onset_unix_s: float, signals: list[dict[str, Any]], date_utc: str, icao24: str,
+    cluster_seconds: float = 60.0,
+) -> list[dict[str, Any]]:
+    """Cluster usable signal transitions into bounded 60-second multi-label episodes."""
+    usable = []
+    for signal in signals:
+        subtype = usable_subtype(signal)
+        offset = signal.get("offset_s")
+        if subtype is None or isinstance(offset, bool) or not isinstance(offset, (int, float)):
+            continue
+        usable.append((float(offset), subtype))
+    usable.sort()
+    if not usable:
+        return []
+    offset_origin = usable[0][0]
+    episodes: list[dict[str, Any]] = []
+    for offset, subtype in usable:
+        event_time = float(usable_onset_unix_s) + offset - offset_origin
+        if not episodes or event_time - episodes[-1]["event_unix_s"] > cluster_seconds:
+            episodes.append({"event_unix_s": event_time, "signal_subtypes": set()})
+        episodes[-1]["signal_subtypes"].add(subtype)
+    for episode in episodes:
+        episode["signal_subtypes"] = sorted(episode["signal_subtypes"])
+        material = f"{date_utc}:{icao24.lower()}:{episode['event_unix_s']:.3f}"
+        episode["event_id"] = hashlib.sha256(material.encode()).hexdigest()[:20]
+    return episodes
+
+
 def labeled_rows(
     points: list[dict[str, Any]],
     event_time: float | None,
     record: dict[str, Any],
     config: argparse.Namespace,
+    event_signal_subtypes: list[str] | None = None,
+    event_episodes: list[dict[str, Any]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     for segment_index, segment in enumerate(segments(points, config.max_gap_seconds)):
         if len(segment) < config.min_points:
@@ -164,17 +219,35 @@ def labeled_rows(
             history = segment[left:index + 1]
             if len(history) < config.min_points or history[0]["timestamp_unix_s"] > start + config.max_gap_seconds:
                 continue
-            if event_time is not None and anchor >= event_time - config.min_lead_seconds:
-                continue
-            positive = (
-                event_time is not None
-                and times[0] <= event_time <= times[-1]
-                and config.min_lead_seconds < event_time - anchor <= config.horizon_seconds
-            )
+            future_events: list[dict[str, Any]] = []
+            near_event = False
+            if event_episodes is not None:
+                segment_events = [
+                    event for event in event_episodes
+                    if times[0] <= float(event["event_unix_s"]) <= times[-1]
+                ]
+                deltas = [float(event["event_unix_s"]) - anchor for event in segment_events]
+                near_event = any(0 < delta <= config.min_lead_seconds for delta in deltas)
+                future_events = [
+                    event for event, delta in zip(segment_events, deltas)
+                    if config.min_lead_seconds < delta <= config.horizon_seconds
+                ]
+                if near_event:
+                    continue
+                positive = bool(future_events)
+            else:
+                if event_time is not None and anchor >= event_time - config.min_lead_seconds:
+                    continue
+                positive = (
+                    event_time is not None
+                    and times[0] <= event_time <= times[-1]
+                    and config.min_lead_seconds < event_time - anchor <= config.horizon_seconds
+                )
             if not positive and times[-1] < anchor + config.horizon_seconds:
                 continue
             features = extract_features(history)
             temporal_features = extract_temporal_features(history)
+            sequence = resample_sequence(history, anchor)
             if tuple(features) != FEATURE_NAMES:
                 raise ValueError("Feature schema changed unexpectedly")
             last_anchor = anchor
@@ -183,23 +256,45 @@ def labeled_rows(
             leg_index = segment[0]["flight_leg_index"]
             group_id = f"{day}:{icao24}:{leg_index}:{segment_index}"
             digest = hashlib.sha256(f"{group_id}:{anchor:.3f}".encode()).hexdigest()[:20]
+            episode_mode = event_episodes is not None
+            event_time_for_row = (
+                float(future_events[0]["event_unix_s"]) if episode_mode and future_events
+                else event_time if positive else None
+            )
+            subtype_names = sorted({
+                subtype for event in future_events for subtype in event["signal_subtypes"]
+            }) if episode_mode else list(event_signal_subtypes or ()) if positive else []
+            subtype_targets = {name: int(name in subtype_names) for name in subtype_names}
+            targets = {"any_declaration": int(positive)}
+            targets.update({name: int(name in subtype_names) for name in SUPPORTED_SUBTYPE_HEADS})
             yield {
-                "schema_version": 1,
+                "schema_version": 3 if episode_mode else 2,
                 "example_id": digest,
-                "target": TARGET,
+                "target": EPISODE_TARGET if episode_mode else TARGET,
                 "label": int(positive),
+                "targets": targets if episode_mode else None,
+                "subtype_targets": subtype_targets if episode_mode else None,
                 "date_utc": day,
                 "icao24": icao24,
                 "group_id": group_id,
                 "flight_leg_index": leg_index,
                 "anchor_unix_s": anchor,
                 "anchor_utc": utc(anchor),
-                "event_unix_s": event_time if positive else None,
-                "event_utc": utc(event_time) if positive and event_time is not None else None,
+                "event_unix_s": event_time_for_row,
+                "event_utc": utc(event_time_for_row) if event_time_for_row is not None else None,
+                "future_events": [
+                    {"event_id": event["event_id"], "event_unix_s": event["event_unix_s"],
+                     "signal_subtypes": list(event["signal_subtypes"])}
+                    for event in future_events
+                ] if episode_mode else None,
                 "trace_file": record["trace_file"],
                 "source_cohort": "candidate" if event_time is not None else "control_sample",
                 "features": features,
                 "temporal_features": temporal_features,
+                "sequence_schema_version": 2 if episode_mode else 1,
+                "sequence": sequence,
+                # Evaluation metadata only. This field is never passed to a model.
+                "event_signal_subtypes": subtype_names if positive else [],
                 "airborne_exposure_seconds": airborne_exposure(segment, index, config.stride_seconds),
             }
 
@@ -237,11 +332,14 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
     completed_dates = {path.stem for path in (config.collection_dir / "reports").glob("*.json")}
     keys: set[tuple[str, str]] = set()
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    output = config.output_dir / "declaration_windows.jsonl"
+    episode_mode = bool(getattr(config, "episode_target", False))
+    output_stem = "declaration_episode_windows" if episode_mode else "declaration_windows"
+    output = config.output_dir / f"{output_stem}.jsonl"
     partial = output.with_suffix(".jsonl.tmp")
     counts: Counter[str] = Counter()
     per_date: dict[str, Counter[str]] = {}
     candidates_without_positive: list[str] = []
+    episode_count = 0
     try:
         with partial.open("w", encoding="utf-8", newline="\n") as stream:
             for positive_manifest, record in records:
@@ -263,13 +361,28 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
                     if decision["decision"] != "include_proxy":
                         raise ValueError(f"Unknown audit decision: {key}")
                 points, event_time = checked_trace(record, config.collection_dir, positive_manifest)
+                event_signal_subtypes: list[str] = []
+                event_episodes: list[dict[str, Any]] | None = [] if episode_mode else None
                 if positive_manifest:
                     event_time = decision["usable_onset_unix_s"]
                     if event_time is None:
                         raise ValueError(f"Included candidate has no onset: {key}")
+                    if episode_mode:
+                        event_episodes = build_signal_episodes(
+                            event_time, decision.get("signals", []), day, icao24,
+                        )
+                        episode_count += len(event_episodes)
+                    else:
+                        event_signal_subtypes = sorted({
+                            subtype for signal in decision.get("signals", [])
+                            if (subtype := usable_subtype(signal)) is not None
+                        })
                 counts["candidate_traces" if positive_manifest else "control_traces"] += 1
                 trace_positive = 0
-                for example in labeled_rows(points, event_time, record, config):
+                for example in labeled_rows(
+                    points, event_time, record, config, event_signal_subtypes,
+                    event_episodes=event_episodes,
+                ):
                     stream.write(json.dumps(example, separators=(",", ":"), allow_nan=False) + "\n")
                     label_name = "positive_windows" if example["label"] else "negative_windows"
                     counts[label_name] += 1
@@ -296,13 +409,24 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
                         raise
                     time.sleep(0.4)
     summary = {
-        "schema_version": 1,
-        "target": TARGET,
-        "target_meaning": "First audited usable ADS-B emergency status or squawk 7500/7600/7700 within the lead-time window; lifeguard-only status is excluded. This is not independently confirmed incident risk.",
+        "schema_version": 3 if episode_mode else 2,
+        "target": EPISODE_TARGET if episode_mode else TARGET,
+        "target_meaning": (
+            "Each transition among usable ADS-B emergency statuses or squawks is a timestamped proxy episode; transitions up to 60 seconds after the first signal are grouped into one multi-label episode. This is not independently confirmed incident risk."
+            if episode_mode else
+            "First audited usable ADS-B emergency status or squawk 7500/7600/7700 within the lead-time window; lifeguard-only status is excluded. This is not independently confirmed incident risk."
+        ),
         "collection_dir": str(config.collection_dir.resolve()),
         "examples_file": str(output.resolve()),
         "feature_names": list(FEATURE_NAMES),
         "temporal_feature_names": list(TEMPORAL_FEATURE_NAMES),
+        "sequence_schema_version": 2 if episode_mode else 1,
+        "sequence_channels": list(CHANNEL_NAMES) if episode_mode else [
+            "altitude_baro_ft", "ground_speed_kt", "vertical_rate_fpm",
+            "track_sin", "track_cos", "on_ground", "altitude_valid",
+            "ground_speed_valid", "vertical_rate_valid", "track_valid", "on_ground_valid",
+        ],
+        "supported_subtype_heads": list(SUPPORTED_SUBTYPE_HEADS) if episode_mode else [],
         "audit_file": str(config.audit_file.resolve()),
         "config": {
             "context_seconds": config.context_seconds,
@@ -311,13 +435,15 @@ def build_dataset(config: argparse.Namespace) -> dict[str, Any]:
             "stride_seconds": config.stride_seconds,
             "max_gap_seconds": config.max_gap_seconds,
             "min_points": config.min_points,
+            "episode_cluster_seconds": 60 if episode_mode else None,
         },
         "counts": dict(counts),
+        "event_episodes": episode_count if episode_mode else None,
         "per_date": {day: dict(date_counts) for day, date_counts in sorted(per_date.items())},
         "candidates_without_positive_windows": candidates_without_positive,
         "warning": "Dates and aircraft are heavily sampled; negative windows mean no declaration observed during a covered horizon, not no real-world emergency. Prevalence and risk calibration are unavailable from this cohort.",
     }
-    (config.output_dir / "declaration_windows_summary.json").write_text(
+    (config.output_dir / f"{output_stem}_summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )
     return summary
@@ -330,7 +456,8 @@ def main() -> int:
     except (OSError, ValueError, TypeError, KeyError, OverflowError) as exc:
         print(f"Labeling failed: {exc}")
         return 1
-    print(json.dumps({"target": TARGET, "counts": summary["counts"], "per_date": summary["per_date"]}, indent=2))
+    print(json.dumps({"target": summary["target"], "counts": summary["counts"],
+                      "event_episodes": summary["event_episodes"], "per_date": summary["per_date"]}, indent=2))
     print(f"Wrote {summary['examples_file']}")
     return 0
 
