@@ -13,7 +13,7 @@
     "altitude_baro_ft": 14850,         // pressure altitude, ft, what ATC uses | live: alt_baro | history: point[3]
     "altitude_geom_ft": 15575,         // GPS altitude, ft, can read above or below baro | live: alt_geom | history: point[10]
     "on_ground": false,                // true when parked or taxiing | live: alt_baro == "ground" | history: point[3] == "ground"
-    "source": "adsb_icao",             // adsb_icao = aircraft's own broadcast, adsr_icao = rebroadcast (no accuracy data), mlat = ground-estimated | live: type | history: point[9]
+    "source": "adsb_icao",             // readsb message type, any readsb value allowed: adsb_icao = aircraft's own broadcast, adsr_icao = rebroadcast (no accuracy data), mlat = ground-estimated, tisb_* = rebroadcast radar track | live: type | history: point[9]
     "accuracy_m": 186,                 // position accuracy radius, smaller is better, null when unknown | live: rc (0 means unknown) | history: not stored
     "stale": false                     // true if no position heard for 20+ s before this | live: seen_pos > 20 | history: point[6] & 1
   },
