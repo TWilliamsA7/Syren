@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -25,6 +27,7 @@ class Position:
     altitude_geom_ft: float | None = None
     on_ground: bool | None = None
     source: str | None = None
+    accuracy_m: float | None = None
     stale: bool | None = None
 
 
@@ -34,8 +37,11 @@ class Kinematics:
     track_deg: float | None = None
     vertical_rate_baro_fpm: float | None = None
     vertical_rate_geom_fpm: float | None = None
-    ias_kts: float | None = None
-    roll_deg: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Navigation:
+    selected_altitude_ft: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +59,7 @@ class FlightState:
     aircraft: Aircraft = field(default_factory=Aircraft)
     position: Position = field(default_factory=Position)
     kinematics: Kinematics = field(default_factory=Kinematics)
+    nav: Navigation = field(default_factory=Navigation)
     status: Status = field(default_factory=Status)
     origin: str | None = None
 
@@ -90,6 +97,30 @@ class DetectionResult:
 
 def flight_state_from_mapping(data: Mapping[str, Any]) -> FlightState:
     """Parse a protocol-shaped mapping while leaving omitted values as None."""
+    def optional_number(section_value: Mapping[str, Any], key: str) -> float | None:
+        value = section_value.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{key} must be a finite number or null")
+        return float(value)
+
+    def optional_string(section_value: Mapping[str, Any], key: str) -> str | None:
+        value = section_value.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string or null")
+        return value
+
+    def optional_boolean(section_value: Mapping[str, Any], key: str) -> bool | None:
+        value = section_value.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be a boolean or null")
+        return value
+
     def section(name: str) -> Mapping[str, Any]:
         value = data.get(name)
         if value is None:
@@ -101,25 +132,68 @@ def flight_state_from_mapping(data: Mapping[str, Any]) -> FlightState:
     aircraft = section("aircraft")
     position = section("position")
     kinematics = section("kinematics")
+    nav = section("nav")
     status = section("status")
     icao24 = data.get("icao24")
     if not isinstance(icao24, str) or not icao24.strip():
         raise ValueError("icao24 must be a non-empty string")
+    icao24 = icao24.strip().lower()
     timestamp = data.get("timestamp")
-    if not isinstance(timestamp, (int, float)):
-        raise ValueError("timestamp must be numeric Unix seconds")
-    flight_id = data.get("flight_id")
-    if not isinstance(flight_id, str) or not flight_id.strip():
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp):
+        raise ValueError("timestamp must be finite numeric Unix seconds")
+    flight_id_value = data.get("flight_id")
+    if flight_id_value is not None and not isinstance(flight_id_value, str):
+        raise ValueError("flight_id must be a string or null")
+    flight_id = re.sub(r"\s+", "", flight_id_value or "")
+    if not flight_id:
         flight_id = icao24
+
+    for key in ("registration", "type_code", "category"):
+        optional_string(aircraft, key)
+    for key in ("latitude", "longitude", "altitude_baro_ft", "altitude_geom_ft", "accuracy_m"):
+        optional_number(position, key)
+    for key in ("ground_speed_kts", "track_deg", "vertical_rate_baro_fpm", "vertical_rate_geom_fpm"):
+        optional_number(kinematics, key)
+    optional_number(nav, "selected_altitude_ft")
+    for key in ("squawk", "emergency"):
+        optional_string(status, key)
+    optional_number(status, "seen_age_s")
+    optional_string(position, "source")
+    optional_string(data, "origin")
+    optional_boolean(position, "on_ground")
+    optional_boolean(position, "stale")
+    latitude = optional_number(position, "latitude")
+    longitude = optional_number(position, "longitude")
+    accuracy = optional_number(position, "accuracy_m")
+    if latitude is not None and not -90.0 <= latitude <= 90.0:
+        raise ValueError("latitude must be between -90 and 90 degrees")
+    if longitude is not None and not -180.0 <= longitude <= 180.0:
+        raise ValueError("longitude must be between -180 and 180 degrees")
+    if accuracy is not None and accuracy < 0:
+        raise ValueError("accuracy_m must be non-negative")
 
     return FlightState(
         timestamp=float(timestamp),
         icao24=icao24,
         flight_id=flight_id,
         aircraft=Aircraft(**{key: aircraft.get(key) for key in Aircraft.__dataclass_fields__}),
-        position=Position(**{key: position.get(key) for key in Position.__dataclass_fields__}),
-        kinematics=Kinematics(**{key: kinematics.get(key) for key in Kinematics.__dataclass_fields__}),
-        status=Status(**{key: status.get(key) for key in Status.__dataclass_fields__}),
+        position=Position(**{
+            "latitude": optional_number(position, "latitude"),
+            "longitude": optional_number(position, "longitude"),
+            "altitude_baro_ft": optional_number(position, "altitude_baro_ft"),
+            "altitude_geom_ft": optional_number(position, "altitude_geom_ft"),
+            "on_ground": optional_boolean(position, "on_ground"),
+            "source": optional_string(position, "source"),
+            "accuracy_m": optional_number(position, "accuracy_m"),
+            "stale": optional_boolean(position, "stale"),
+        }),
+        kinematics=Kinematics(**{key: optional_number(kinematics, key) for key in Kinematics.__dataclass_fields__}),
+        nav=Navigation(selected_altitude_ft=optional_number(nav, "selected_altitude_ft")),
+        status=Status(
+            squawk=optional_string(status, "squawk"),
+            emergency=optional_string(status, "emergency"),
+            seen_age_s=optional_number(status, "seen_age_s"),
+        ),
         origin=data.get("origin"),
     )
 
