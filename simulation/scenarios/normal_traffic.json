@@ -1,0 +1,25 @@
+{
+  "name": "normal_traffic",
+  "description": "Eight normal flights between Florida airports, no anomalies.",
+  "start_time": 1790400000,
+  "duration_s": 3600,
+  "dt": 1.0,
+  "flights": [
+    {"icao24": "~5f0001", "callsign": "SYN101", "type_code": "A320",
+     "origin": "MCO", "destination": "MIA", "cruise_altitude_ft": 31000, "depart_at_s": 0},
+    {"icao24": "~5f0002", "callsign": "SYN202", "type_code": "B738",
+     "origin": "MIA", "destination": "MCO", "cruise_altitude_ft": 30000, "depart_at_s": 60},
+    {"icao24": "~5f0003", "callsign": "SYN303", "type_code": "A321",
+     "origin": "MCO", "destination": "JAX", "cruise_altitude_ft": 24000, "depart_at_s": 150},
+    {"icao24": "~5f0004", "callsign": "SYN404", "type_code": "B39M",
+     "origin": "JAX", "destination": "MCO", "cruise_altitude_ft": 23000, "depart_at_s": 240},
+    {"icao24": "~5f0005", "callsign": "SYN505", "type_code": "A20N",
+     "origin": "TPA", "destination": "JAX", "cruise_altitude_ft": 33000, "depart_at_s": 360},
+    {"icao24": "~5f0006", "callsign": "SYN606", "type_code": "B738",
+     "origin": "JAX", "destination": "RSW", "cruise_altitude_ft": 34000, "depart_at_s": 480},
+    {"icao24": "~5f0007", "callsign": "SYN707", "type_code": "E75L",
+     "origin": "RSW", "destination": "MCO", "cruise_altitude_ft": 21000, "depart_at_s": 600},
+    {"icao24": "~5f0008", "callsign": "SYN808", "type_code": "A320",
+     "origin": "MCO", "destination": "TPA", "cruise_altitude_ft": 16000, "depart_at_s": 900}
+  ]
+}

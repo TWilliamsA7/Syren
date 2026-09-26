@@ -40,6 +40,7 @@ class FlightPlan:
     destination: Airport
     cruise_altitude_ft: float
     cruise_speed_kts: float = 450
+    squawk: str = "1200"
     phase: str = "takeoff"
 
     def spawn(self, icao24, callsign, type_code, category="A3"):
@@ -86,26 +87,33 @@ class FlightPlan:
             ac.vertical_rate_fpm = 0.0
 
     def _set_targets(self, ac, distance_nm, bearing):
+        ac.squawk = self.squawk
+        ac.emergency = "none"
+        ac.transponder_on = True
+
         if self.phase == "landed":
             ac.selected_altitude_ft = None
             ac.target_vertical_rate_fpm = 0.0
             ac.target_speed_kts = 0.0
             return
 
-        if distance_nm > 1:
-            ac.target_track_deg = bearing
+        ac.target_track_deg = bearing if distance_nm > 1 else None
+        ac.target_vertical_rate_fpm = None
+        ac.climb_rate_fpm = 2000
+        ac.descent_rate_fpm = 2000
 
         if self.phase == "takeoff":
+            ac.selected_altitude_ft = self.cruise_altitude_ft
             ac.climb_rate_fpm = 3000
             ac.target_speed_kts = 250
         elif self.phase in ("climb", "cruise"):
-            ac.climb_rate_fpm = 2000
+            ac.selected_altitude_ft = self.cruise_altitude_ft
             ac.target_speed_kts = self.cruise_speed_kts
         elif self.phase == "descent":
             ac.selected_altitude_ft = self.destination.elevation_ft + APPROACH_ALT_FT
-            ac.descent_rate_fpm = 2000
             ac.target_speed_kts = 300 if ac.altitude_ft > SPEED_LIMIT_ALT_FT else 250
         elif self.phase == "approach":
+            ac.selected_altitude_ft = self.destination.elevation_ft + APPROACH_ALT_FT
             ac.target_speed_kts = 150
             height_ft = ac.altitude_ft - self.destination.elevation_ft
             minutes_to_go = max(distance_nm / max(ac.speed_kts, 1) * 60, 0.1)

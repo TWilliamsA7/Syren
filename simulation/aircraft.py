@@ -39,6 +39,7 @@ class SimAircraft:
     target_vertical_rate_fpm: float | None = None
     climb_rate_fpm: float = 2000.0
     descent_rate_fpm: float = 2000.0
+    transponder_on: bool = True
 
 
     def _desired_vertical_rate(self):
