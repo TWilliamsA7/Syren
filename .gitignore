@@ -5,7 +5,6 @@
 *.pyc
 __pycache__/
 
-# Downloaded ADS-B traces, daily archive scratch files, and collection outputs
+# Local datasets, downloaded traces, and collection outputs
 data/*
 !data/README.md
-!data/events.json
