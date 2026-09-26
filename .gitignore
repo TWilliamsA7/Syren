@@ -4,7 +4,6 @@
 # Python
 __pycache__/
 *.pyc
+node_modules
 
-
-data/generated/
 data/archive/
