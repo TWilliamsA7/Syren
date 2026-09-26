@@ -4,6 +4,7 @@ import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from backend.gemini import question_status, start_question
 from data.history import available_range, days_on_disk
 from data.replay import history_status, skip, start_history, stop_history
 
@@ -14,23 +15,30 @@ LIVE_FILE = os.path.join(REPO, "frontend", "public", "data.jsonl")
 
 class Handler(BaseHTTPRequestHandler):
 
-    # Send body back as JSON.
+    # Send body back as JSON. If the browser already hung up there's no one to answer.
     def _reply(self, body, status=200):
         data = json.dumps(body).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     # The JSON body of a POST, or {} if there is none.
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(length) or b"{}")
 
-    # GET /api/history_status, polled every second; GET /api/history_days for the date picker.
+    # GET /api/history_status, polled every second; GET /api/history_days for the date picker;
+    # GET /api/ask_aircraft/<job>, polled every second for a Gemini answer.
     def do_GET(self):
-        if self.path == "/api/history_status":
+        if self.path.startswith("/api/ask_aircraft/"):
+            status = question_status(self.path.rsplit("/", 1)[1])
+            self._reply(status if status else {"error": "unknown question"}, 200 if status else 404)
+        elif self.path == "/api/history_status":
             self._reply(history_status())
         elif self.path == "/api/history_days":
             first, last = available_range()
@@ -38,12 +46,15 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._reply({"error": "not found"}, 404)
 
-    # POST /api/start_history {date, start}, /api/stop_history, /api/skip {seconds}.
-    # Replies with the new history status.
+    # POST /api/start_history {date, start}, /api/stop_history, /api/skip {seconds}:
+    # replies with the new history status. POST /api/ask_aircraft {aircraft: FlightState}:
+    # starts asking Gemini and replies {"job": id} at once; poll GET /api/ask_aircraft/<id>.
     def do_POST(self):
         try:
             body = self._body()
-            if self.path == "/api/start_history":
+            if self.path == "/api/ask_aircraft":
+                return self._reply({"job": start_question(body["aircraft"])}, 202)
+            elif self.path == "/api/start_history":
                 start_history(body["date"], body.get("start", "16:00"))
             elif self.path == "/api/stop_history":
                 stop_history()

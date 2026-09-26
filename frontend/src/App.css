@@ -191,7 +191,7 @@ html, body, #root {
   left: 12px;
   bottom: 12px;
   z-index: 30;
-  min-width: 200px;
+  width: 290px;
   padding: 8px 10px;
   background: rgba(15, 23, 42, 0.95);
   border: 1px solid var(--border);
@@ -200,10 +200,61 @@ html, body, #root {
   pointer-events: none;
 }
 
+.map-tooltip.pinned {
+  pointer-events: auto;
+  border-color: var(--accent);
+}
+
 .map-tooltip .callsign {
+  display: flex;
+  align-items: baseline;
   font-weight: 600;
   font-size: 13px;
   margin-bottom: 6px;
+}
+
+.map-tooltip .close {
+  margin-left: auto;
+  padding: 0 2px;
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.map-tooltip .close:hover {
+  color: var(--text-main);
+}
+
+.tooltip-hint {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.gemini {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.gemini .btn {
+  width: 100%;
+}
+
+.gemini .form-error {
+  margin-bottom: 8px;
+}
+
+.gemini-answer {
+  margin: 0 0 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .map-tooltip .callsign span,
@@ -425,6 +476,38 @@ html, body, #root {
 
 .status-line.alert {
   color: var(--red);
+}
+
+.emergency-list {
+  list-style: none;
+  margin: 8px 0 0 15px;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.emergency-list button {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-main);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.emergency-list button:hover {
+  background: var(--bg-sidebar);
+}
+
+.emergency-detail {
+  color: var(--red);
+  font-size: 12px;
 }
 
 .kv {

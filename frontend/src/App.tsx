@@ -34,6 +34,15 @@ interface Aircraft {
   dst?: number;
   dir?: number;
   timestamp?: string;
+  state?: Record<string, unknown>;  // the full FlightState from the feed, sent to Gemini
+  anomaly?: string;  // set by the AI model, see docs/protocol.md; "none" when nothing is wrong
+}
+
+// Gemini's answer for one aircraft, kept with its hex so a late reply can't land on another plane
+interface GeminiAnswer {
+  hex: string;
+  status: 'loading' | 'done' | 'error';
+  text: string;
 }
 
 const DEFAULT_VIEW_STATE = {
@@ -55,11 +64,17 @@ const REGION_VIEWS = {
   US_EAST: { longitude: -75.1652, latitude: 39.9526, zoom: 5, pitch: 0, bearing: 0 }
 };
 
-// Inline SVG Atlas for the plane icon with black outline/stroke
-const AIRPLANE_ICON = 'data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 24 24" fill="%2336F6B4" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path d="M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z"/></svg>';
+// Inline SVG Atlas for the plane icon with black outline/stroke: the plane twice, green (x 0)
+// and red (x 128). The icons aren't masks, so getColor can't recolor them; getIcon picks one.
+const PLANE_PATH = 'M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z';
+const AIRPLANE_ICON = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128" viewBox="0 0 48 24" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path fill="%2336F6B4" d="${PLANE_PATH}"/><path fill="%23F43F5E" transform="translate(24 0)" d="${PLANE_PATH}"/></svg>`;
 const ICON_MAPPING = {
-  marker: { x: 0, y: 0, width: 128, height: 128, mask: false }
+  marker: { x: 0, y: 0, width: 128, height: 128, mask: false },
+  alert: { x: 128, y: 0, width: 128, height: 128, mask: false }
 };
+
+// Red on the map: the model flagged a squawk anomaly, or the transponder reports an emergency
+const isAlert = (d: Aircraft) => d.anomaly === 'squawk' || (!!d.emergency && d.emergency !== 'none');
 
 type Region = 'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST';
 const REGION_LABELS: [Region, string][] = [
@@ -105,8 +120,11 @@ function App() {
   const [searchedAircraft, setSearchedAircraft] = useState<Aircraft | null>(null);
   const [searchError, setSearchError] = useState<string>('');
   const [hoveredAircraft, setHoveredAircraft] = useState<Aircraft | null>(null);
+  const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(null);  // pinned by a click
+  const [geminiAnswer, setGeminiAnswer] = useState<GeminiAnswer | null>(null);
 
   const consecutiveFailuresRef = useRef<number>(0);
+  const askingHexRef = useRef<string | null>(null);  // the aircraft whose Gemini answer is being waited for
 
   // Helper function to safely parse either JSON array or NDJSON (JSON Lines)
   const parseJsonData = (text: string) => {
@@ -182,8 +200,10 @@ function App() {
           baro_rate: item.kinematics?.vertical_rate_baro_fpm,
           squawk: item.status?.squawk,
           emergency: item.status?.emergency,
+          anomaly: item.anomaly,
           category: item.aircraft?.category,
-          timestamp: item.timestamp ? new Date(item.timestamp * 1000).toISOString() : new Date().toISOString()
+          timestamp: item.timestamp ? new Date(item.timestamp * 1000).toISOString() : new Date().toISOString(),
+          state: item
         }));
 
         setAircraftList(parsedData);
@@ -316,7 +336,58 @@ function App() {
     }));
   };
 
-  const emergencyCount = aircraftList.filter(a => a.emergency && a.emergency !== 'none').length;
+  const emergencyAircraft = aircraftList.filter(a => a.emergency && a.emergency !== 'none');
+  const emergencyCount = emergencyAircraft.length;
+
+  // The pinned aircraft with its newest data; its last known data if it has left the feed
+  const pinnedAircraft = selectedAircraft
+    ? aircraftList.find(a => a.hex === selectedAircraft.hex) ?? selectedAircraft
+    : null;
+  const popupAircraft = pinnedAircraft ?? hoveredAircraft;
+  const pinnedAnswer = pinnedAircraft && geminiAnswer?.hex === pinnedAircraft.hex ? geminiAnswer : null;
+
+  const askGemini = async () => {
+    if (!pinnedAircraft) return;
+    const hex = pinnedAircraft.hex;
+    // Only store the reply if this aircraft is still the one being asked about
+    const answer = (status: GeminiAnswer['status'], text: string) =>
+      setGeminiAnswer(previous => (previous?.hex === hex ? { hex, status, text } : previous));
+
+    setGeminiAnswer({ hex, status: 'loading', text: '' });
+    askingHexRef.current = hex;
+
+    // Start the question, then check for the answer every second. One request held open while
+    // Gemini thinks gets dropped by the browser now and then (Firefox does after a network change);
+    // a dropped check just retries a second later.
+    let job: string;
+    try {
+      const response = await fetch('/api/ask_aircraft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ aircraft: pinnedAircraft.state })
+      });
+      const data = await response.json();
+      if (!response.ok) return answer('error', data.error ?? `Request failed (${response.status})`);
+      job = data.job;
+    } catch {
+      return answer('error', "Couldn't reach the Syren server. Is python -m backend.server running?");
+    }
+
+    let droppedChecks = 0;
+    while (askingHexRef.current === hex && droppedChecks < 5) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        const response = await fetch(`/api/ask_aircraft/${job}`, { cache: 'no-store' });
+        const data = await response.json();
+        if (data.status === 'done') return answer('done', data.answer);
+        if (data.status === 'error' || !response.ok) return answer('error', data.error ?? `Request failed (${response.status})`);
+        droppedChecks = 0;
+      } catch {
+        droppedChecks += 1;
+      }
+    }
+    if (askingHexRef.current === hex) answer('error', 'Lost contact with the Syren server while waiting for Gemini.');
+  };
 
   const replayState: string = historyStatusInfo.state;
   const canSkip = historyMode && replayState === 'playing';
@@ -343,20 +414,20 @@ function App() {
         : (searchedAircraft ? [searchedAircraft] : aircraftList),
       iconAtlas: AIRPLANE_ICON,
       iconMapping: ICON_MAPPING,
-      getIcon: () => 'marker',
+      getIcon: (d: Aircraft) => (isAlert(d) ? 'alert' : 'marker'),
       getPosition: (d: Aircraft) => [d.lon ?? -95.7129, d.lat ?? 37.0902],
       getSize: 24,
       getAngle: (d: any) => {
         const rawHeading = d.true_heading ?? d.nav_heading ?? d.heading ?? d.track ?? 0;
-        return -rawHeading; 
+        return -rawHeading;
       },
-      getColor: (d: Aircraft) => 
-        (d.emergency && d.emergency !== 'none') ? [244, 63, 94] : [54, 246, 180],
       pickable: true,
       onHover: info => setHoveredAircraft(info.object as Aircraft || null),
+      onClick: info => { if (info.object) setSelectedAircraft(info.object as Aircraft); },
       updateTriggers: {
         data: [aircraftList, searchedAircraft, viewMode],
-        getAngle: [aircraftList, searchedAircraft, viewMode] 
+        getAngle: [aircraftList, searchedAircraft, viewMode],
+        getIcon: [aircraftList, searchedAircraft, viewMode]
       }
     })
   ];
@@ -396,17 +467,34 @@ function App() {
             />
           </DeckGL>
 
-          {hoveredAircraft && (
-            <div className="map-tooltip">
+          {popupAircraft && (
+            <div className={`map-tooltip ${pinnedAircraft ? 'pinned' : ''}`}>
               <div className="callsign">
-                {hoveredAircraft.flight?.trim() || 'Unknown'}
-                <span className="mono">{hoveredAircraft.hex}</span>
+                {popupAircraft.flight?.trim() || 'Unknown'}
+                <span className="mono">{popupAircraft.hex}</span>
+                {pinnedAircraft && (
+                  <button className="close" onClick={() => setSelectedAircraft(null)} aria-label="Close">×</button>
+                )}
               </div>
               <dl className="kv">
-                <dt>Altitude</dt><dd>{formatNumber(hoveredAircraft.alt_baro, 'ft')}</dd>
-                <dt>Ground speed</dt><dd>{formatNumber(hoveredAircraft.gs, 'kt')}</dd>
-                <dt>Squawk</dt><dd>{hoveredAircraft.squawk || '—'}</dd>
+                <dt>Altitude</dt><dd>{formatNumber(popupAircraft.alt_baro, 'ft')}</dd>
+                <dt>Ground speed</dt><dd>{formatNumber(popupAircraft.gs, 'kt')}</dd>
+                <dt>Squawk</dt><dd>{popupAircraft.squawk || '—'}</dd>
               </dl>
+
+              {pinnedAircraft ? (
+                <div className="gemini">
+                  {pinnedAnswer?.status === 'done' && <p className="gemini-answer">{pinnedAnswer.text}</p>}
+                  {pinnedAnswer?.status === 'error' && <p className="form-error">{pinnedAnswer.text}</p>}
+                  <button className="btn" onClick={askGemini} disabled={pinnedAnswer?.status === 'loading'}>
+                    {pinnedAnswer?.status === 'loading' ? 'Asking Gemini…'
+                      : pinnedAnswer?.status === 'done' ? 'Ask Gemini again'
+                      : 'Ask Gemini about this aircraft'}
+                  </button>
+                </div>
+              ) : (
+                <div className="tooltip-hint">Click the aircraft to pin this</div>
+              )}
             </div>
           )}
 
@@ -508,6 +596,18 @@ function App() {
                 ? `${emergencyCount} aircraft squawking an emergency`
                 : 'No emergency squawks'}
             </div>
+            {emergencyCount > 0 && (
+              <ul className="emergency-list">
+                {emergencyAircraft.map(a => (
+                  <li key={a.hex}>
+                    <button onClick={() => setSelectedAircraft(a)} title="Show this aircraft's details">
+                      <span className="mono">{a.flight?.trim() || a.hex}</span>
+                      <span className="emergency-detail mono">{a.squawk ?? '----'} · {a.emergency}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
 
           <section className="panel-section">

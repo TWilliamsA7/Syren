@@ -1,3 +1,3 @@
 # Syren
 cd frontend && npm run dev     
-python3 -m backend.server 
+.venv/bin/python -m backend.server  
