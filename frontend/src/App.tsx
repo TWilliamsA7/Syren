@@ -4,6 +4,7 @@ import Map from 'react-map-gl/maplibre'; // or 'react-map-gl' for Mapbox
 import { IconLayer } from '@deck.gl/layers';
 
 import './App.css';
+import logo from './assets/syren-logo.png';
 
 interface Aircraft {
   hex: string;
@@ -437,7 +438,10 @@ function App() {
 
       <header className="syren-header">
         <div className="header-left">
-          <h1 className="wordmark">SYREN</h1>
+          <div className="brand">
+            <img src={logo} alt="" className="logo" />
+            <h1 className="wordmark">SYREN</h1>
+          </div>
           <div className="mode">
             <span className={`dot ${feedDot}`} />
             <span className="mode-label">{feedLabel}</span>
@@ -468,7 +472,7 @@ function App() {
           </DeckGL>
 
           {popupAircraft && (
-            <div className={`map-tooltip ${pinnedAircraft ? 'pinned' : ''}`}>
+            <div className={`map-tooltip ${pinnedAircraft ? 'pinned' : ''} ${pinnedAnswer?.status === 'loading' ? 'asking' : ''}`}>
               <div className="callsign">
                 {popupAircraft.flight?.trim() || 'Unknown'}
                 <span className="mono">{popupAircraft.hex}</span>

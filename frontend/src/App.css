@@ -67,6 +67,18 @@ html, body, #root {
   min-width: 0;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo {
+  display: block;
+  height: 36px;
+  width: auto;
+}
+
 .wordmark {
   margin: 0;
   font-size: 15px;
@@ -202,7 +214,41 @@ html, body, #root {
 
 .map-tooltip.pinned {
   pointer-events: auto;
-  border-color: var(--accent);
+}
+
+/* While Gemini is answering: a shimmering border, blue through to the plane green */
+@property --shimmer-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.map-tooltip.asking {
+  border: 2px solid transparent;
+  padding: 7px 9px;  /* 1px less, so the thicker border doesn't shift the content */
+  background:
+    linear-gradient(var(--bg-main), var(--bg-main)) padding-box,
+    conic-gradient(from var(--shimmer-angle),
+      #1D4ED8, var(--accent), var(--accent-border), #22D3EE, var(--green), #22D3EE, var(--accent), #1D4ED8) border-box;
+  animation:
+    shimmer-spin 2.4s linear infinite,
+    shimmer-glow 2.4s ease-in-out infinite;
+}
+
+@keyframes shimmer-spin {
+  to { --shimmer-angle: 360deg; }
+}
+
+@keyframes shimmer-glow {
+  0%, 100% { box-shadow: 0 0 12px rgba(59, 130, 246, 0.45); }
+  50% { box-shadow: 0 0 18px rgba(54, 246, 180, 0.4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .map-tooltip.asking {
+    animation: none;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.45);
+  }
 }
 
 .map-tooltip .callsign {
