@@ -1,7 +1,12 @@
 import re
 ORIGINS = {"live", "history", "sim"}
 EMERGENCIES = {"none", "general", "lifeguard", "minfuel", "nordo", "unlawful", "downed"}
-SOURCES = {"adsb_icao", "adsr_icao", "mlat"}
+SOURCES = {
+    "adsb_icao", "adsb_icao_nt", "adsr_icao", "tisb_icao",
+    "adsc", "mlat", "other", "mode_s",
+    "adsb_other", "adsr_other", "tisb_other", "tisb_trackfile",
+    "unknown",
+}
 TOP_KEYS = (
     "timestamp", "icao24", "flight_id",
     "aircraft", "position", "kinematics", "nav", "status",
