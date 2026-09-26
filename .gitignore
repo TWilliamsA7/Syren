@@ -11,3 +11,4 @@ data/archive/
 node_modules
 frontend/public/history.jsonl
 frontend/public/*.tmp
+*.jsonl
