@@ -1,2 +1,3 @@
 # Syren
-python3 -m simulation.generate data/generated/train_001 --flights 1000 --seed 1  
+cd frontend && npm run dev     
+python3 -m backend.server 
