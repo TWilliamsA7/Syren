@@ -13,7 +13,7 @@
     "altitude_baro_ft": 14850,         // pressure altitude, ft, what ATC uses | live: alt_baro | history: point[3]
     "altitude_geom_ft": 15575,         // GPS altitude, ft, can read above or below baro | live: alt_geom | history: point[10]
     "on_ground": false,                // true when parked or taxiing | live: alt_baro == "ground" | history: point[3] == "ground"
-    "source": "adsb_icao",             // adsb_icao = aircraft's own broadcast, adsr_icao = rebroadcast (no accuracy data), mlat = ground-estimated | live: type | history: point[9]
+    "source": "adsb_icao",             // readsb message type, any readsb value allowed: adsb_icao = aircraft's own broadcast, adsr_icao = rebroadcast (no accuracy data), mlat = ground-estimated, tisb_* = rebroadcast radar track | live: type | history: point[9]
     "accuracy_m": 186,                 // position accuracy radius, smaller is better, null when unknown | live: rc (0 means unknown) | history: not stored
     "stale": false                     // true if no position heard for 20+ s before this | live: seen_pos > 20 | history: point[6] & 1
   },
@@ -31,6 +31,7 @@
     "emergency": "none",               // none, general, lifeguard, minfuel, nordo, unlawful, downed | live: emergency | history: point[8].emergency, reuse last
     "seen_age_s": 0.487                // seconds since the last position, growing = losing contact | live: seen_pos | history: null
   },
+  "anomaly": "none",                   // filled in by the AI model for the UI: none, engine_failure, aggressive_near_ground_speed, accelerating_descent, incoming_aircraft_collision, altitude_anomaly, squawk, heading_anomaly, heading_oscillation, route_deviation, signal_loss | live, history, sim: always "none", detector must ignore it on input
   "origin": "live"                     // live, history, or sim, debugging only, detector must ignore
 }
 
@@ -42,7 +43,7 @@
   "severity": "warning",               // risk as a label: normal < 0.30, advisory < 0.60, warning < 0.85, critical above
   "anomalies": [                       // one entry per problem found, empty if nothing is wrong
     {
-      "type": "RAPID_DESCENT",         // what kind of problem, from a fixed list the UI knows
+      "type": "accelerating_descent",  // what kind of problem, any FlightState anomaly value except none
       "severity": 0.82,                // how confident this one check is, from 0 to 1
       "message": "Descent rate -4200 fpm (baro)"  // text for the alert card, includes the actual number that triggered it
     }

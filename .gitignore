@@ -1,6 +1,15 @@
 # Virtual Environment
 .venv/
 
+# Python
+__pycache__/
+*.pyc
+
+
+data/generated/
+data/archive/
+node_modules
+
 # Pycache
 *.pyc
 __pycache__/
