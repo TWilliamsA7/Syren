@@ -8,6 +8,40 @@ Create one engine per simulation or replay session. Call `update` for a single s
 
 `DetectionEngine()` and `build_default_engine()` create the default V1 rules. A custom detector sequence may be injected for a smaller configuration or later model-backed detector.
 
+## Quick verification on the Jetson
+
+From the repository root, run the generated deterministic suite:
+
+```sh
+python -m detection.harness
+```
+
+It checks a clean normal baseline, every single-aircraft detector, and a projected two-aircraft conflict. It exits non-zero if an expected anomaly is missing or the baseline produces an alert. Run the regression tests with:
+
+```sh
+python -m unittest discover -s detection/tests -v
+```
+
+Replay one protocol `FlightState` JSON object per line and emit one result JSON object per line:
+
+```sh
+python -m detection.harness --input-jsonl path/to/flight_states.jsonl
+```
+
+For plane-to-plane interaction checks, provide one JSON array of synchronized states per line:
+
+```sh
+python -m detection.harness --fleet-jsonl path/to/fleet_snapshots.jsonl
+```
+
+Measure the per-aircraft streaming path at several sizes:
+
+```sh
+python -m detection.harness --benchmark 100 1000 10000
+```
+
+That benchmark intentionally excludes the pairwise conflict scan. The conflict rule is exercised by the smoke suite; benchmark it separately at realistic snapshot sizes before scaling it up, since this first implementation checks aircraft pairs directly.
+
 The default rules cover rapid and accelerating descent, ground-speed decay, abrupt track changes, heading reversals, altitude oscillation, telemetry gaps, altitude/rate disagreement (barometric or geometric), and squawk codes 7500/7600/7700. Fleet snapshots additionally screen projected aircraft conflicts using a short constant-velocity horizon. Thresholds and projections are initial heuristics and should be tuned against simulation and historical replay.
 
 ## Boundaries
