@@ -49,8 +49,9 @@ const DEFAULT_VIEW_STATE = {
 // Region specific view states for zooming buttons
 const REGION_VIEWS = {
   US_ALL: { longitude: -95.7129, latitude: 37.0902, zoom: 4, pitch: 0, bearing: 0 },
-  US_WEST: { longitude: -120.5583, latitude: 38.5556, zoom: 5, pitch: 0, bearing: 0 },
-  US_CENTRAL: { longitude: -96.7970, latitude: 32.7767, zoom: 5, pitch: 0, bearing: 0 },
+  US_WEST: { longitude: -120.5583, latitude: 40.5556, zoom: 4.7, pitch: 0, bearing: 0 },
+  US_MIDWEST: { longitude: -101.6298, latitude: 41.8781, zoom: 5, pitch: 0, bearing: 0 },
+  US_SOUTH: { longitude: -93.7970, latitude: 31.7767, zoom: 5.15, pitch: 0, bearing: 0 },
   US_EAST: { longitude: -75.1652, latitude: 39.9526, zoom: 5, pitch: 0, bearing: 0 }
 };
 
@@ -64,7 +65,7 @@ function App() {
   const [isLive, setIsLive] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string>('Initializing...');
   
-  const [currentRegion, setCurrentRegion] = useState<'US_ALL' | 'US_WEST' | 'US_CENTRAL' | 'US_EAST'>('US_ALL');
+  const [currentRegion, setCurrentRegion] = useState<'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST'>('US_ALL');
   const [viewState, setViewState] = useState(DEFAULT_VIEW_STATE);
   const [simState, setSimState] = useState<'running' | 'paused'>('running');
 
@@ -216,7 +217,7 @@ function App() {
     setSearchError('');
   };
 
-  const handleRegionChange = (region: 'US_ALL' | 'US_WEST' | 'US_CENTRAL' | 'US_EAST') => {
+  const handleRegionChange = (region: 'US_ALL' | 'US_WEST' | 'US_MIDWEST' | 'US_SOUTH' | 'US_EAST') => {
     setCurrentRegion(region);
     setViewState(v => ({
       ...v,
@@ -346,7 +347,8 @@ function App() {
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', paddingRight: '0.25rem' }}>Region Zoom:</span>
             <button className={currentRegion === 'US_ALL' ? 'active' : ''} onClick={() => handleRegionChange('US_ALL')}>Continental US</button>
             <button className={currentRegion === 'US_WEST' ? 'active' : ''} onClick={() => handleRegionChange('US_WEST')}>West Coast</button>
-            <button className={currentRegion === 'US_CENTRAL' ? 'active' : ''} onClick={() => handleRegionChange('US_CENTRAL')}>Central US</button>
+            <button className={currentRegion === 'US_MIDWEST' ? 'active' : ''} onClick={() => handleRegionChange('US_MIDWEST')}>Midwest US</button>
+            <button className={currentRegion === 'US_SOUTH' ? 'active' : ''} onClick={() => handleRegionChange('US_SOUTH')}>South US</button>
             <button className={currentRegion === 'US_EAST' ? 'active' : ''} onClick={() => handleRegionChange('US_EAST')}>East Coast</button>
           </div>
 
