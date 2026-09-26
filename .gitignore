@@ -12,3 +12,4 @@ node_modules
 frontend/public/history.jsonl
 frontend/public/data.jsonl
 frontend/public/*.tmp
+.env
