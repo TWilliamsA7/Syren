@@ -40,9 +40,35 @@ Measure the per-aircraft streaming path at several sizes:
 python -m detection.harness --benchmark 100 1000 10000
 ```
 
+Score a generated dataset against the detector types that its telemetry can
+support:
+
+```sh
+python -m simulation.generate data/generated/train_001 --flights 1000 --seed 1
+python -m detection.evaluate_generated data/generated/train_001
+```
+
+The evaluator requires the matching detector type for rapid descent, erratic
+altitude, speed loss, low-altitude overspeed, squawk, and signal loss. It reports
+engine failure and hijack as symptom alerts rather than causal classifications.
+Route deviation is marked unsupported and excluded from scored denominators:
+`FlightState` provides the observed path but no intended route. Normal-state
+and anomaly-free-flight alert rates are reported separately. The evaluator uses
+the single-state path, so it does not assess aircraft conflicts.
+
 That benchmark intentionally excludes the pairwise conflict scan. The conflict rule is exercised by the smoke suite; benchmark it separately at realistic snapshot sizes before scaling it up, since this first implementation checks aircraft pairs directly.
 
-The default rules cover rapid and accelerating descent, ground-speed decay, abrupt track changes, heading reversals, altitude oscillation, telemetry gaps, altitude/rate disagreement (barometric or geometric), and squawk codes 7500/7600/7700. Fleet snapshots additionally screen projected aircraft conflicts using a short constant-velocity horizon. Thresholds and projections are initial heuristics and should be tuned against simulation and historical replay.
+The default rules cover rapid and accelerating descent, ground-speed decay,
+sustained speed above 300 kt below 10,000 ft, abrupt track changes, heading
+reversals, altitude oscillation, telemetry gaps, altitude/rate disagreement
+(barometric or geometric), and squawk codes 7500/7600/7700. Expected descent
+context suppresses ordinary speed-decay and accelerating-descent alerts during
+planned descent and approach. A speed drop below 280 kt above 10,000 ft can
+still alert during descent; rapid descent and near-ground overspeed remain
+independent.
+Fleet snapshots additionally screen projected aircraft conflicts using a short
+constant-velocity horizon. Thresholds and projections are initial heuristics
+and should be tuned against simulation and historical replay.
 
 ## Boundaries
 

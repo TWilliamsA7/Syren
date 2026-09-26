@@ -4,6 +4,7 @@ from detection.detectors.aircraft_conflict import AircraftConflictDetector
 from detection.detectors.emergency_squawk import EmergencySquawkDetector
 from detection.detectors.heading_anomaly import HeadingAnomalyDetector
 from detection.detectors.heading_oscillation import HeadingOscillationDetector
+from detection.detectors.near_ground_speed import NearGroundSpeedDetector
 from detection.detectors.rapid_descent import RapidDescentDetector
 from detection.detectors.speed_anomaly import SpeedAnomalyDetector
 from detection.detectors.telemetry_consistency import VerticalTelemetryConsistencyDetector
@@ -16,6 +17,7 @@ __all__ = [
     "EmergencySquawkDetector",
     "HeadingAnomalyDetector",
     "HeadingOscillationDetector",
+    "NearGroundSpeedDetector",
     "RapidDescentDetector",
     "SpeedAnomalyDetector",
     "TelemetryQualityDetector",

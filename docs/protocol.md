@@ -43,7 +43,7 @@
   "severity": "warning",               // risk as a label: normal < 0.30, advisory < 0.60, warning < 0.85, critical above
   "anomalies": [                       // one entry per problem found, empty if nothing is wrong
     {
-      "type": "accelerating_descent",  // what kind of problem, any FlightState anomaly value except none
+      "type": "ACCELERATING_DESCENT",  // DetectionResult rule code from detection.models.AnomalyType; distinct from the FlightState UI anomaly hint
       "severity": 0.82,                // how confident this one check is, from 0 to 1
       "message": "Descent rate -4200 fpm (baro)"  // text for the alert card, includes the actual number that triggered it
     }

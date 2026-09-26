@@ -22,7 +22,8 @@ def make_state(
     *,
     timestamp: float,
     icao24: str,
-    altitude_ft: float = 10_000.0,
+    altitude_ft: float = 20_000.0,
+    selected_altitude_ft: float | None = 20_000.0,
     vertical_rate_fpm: float | None = 0.0,
     speed_kts: float | None = 450.0,
     track_deg: float | None = 90.0,
@@ -54,7 +55,7 @@ def make_state(
             "vertical_rate_baro_fpm": vertical_rate_fpm,
             "vertical_rate_geom_fpm": None,
         },
-        "nav": {"selected_altitude_ft": 10_000.0},
+        "nav": {"selected_altitude_ft": selected_altitude_ft},
         "status": {"squawk": squawk, "emergency": "none", "seen_age_s": seen_age_s},
         "origin": "sim",
     }
@@ -74,6 +75,11 @@ def smoke_scenarios() -> tuple[tuple[str, tuple[dict[str, Any], ...], str | None
             "speed_decay",
             tuple(make_state(timestamp=t, icao24="speed01", speed_kts=speed) for t, speed in ((0, 450), (30, 420), (60, 390))),
             "SPEED_ANOMALY",
+        ),
+        (
+            "sustained_near_ground_speed",
+            tuple(make_state(timestamp=t, icao24="fastlow", altitude_ft=5_000, speed_kts=340) for t in (0, 10, 15)),
+            "AGGRESSIVE_NEAR_GROUND_SPEED",
         ),
         (
             "abrupt_track_change",

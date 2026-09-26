@@ -5,7 +5,7 @@ from detection.detectors.base import RuleDetector, bounded_severity
 
 
 class RapidDescentDetector(RuleDetector):
-    def __init__(self, warning_fpm: float = 3000.0, critical_fpm: float = 5000.0) -> None:
+    def __init__(self, warning_fpm: float = 3200.0, critical_fpm: float = 5000.0) -> None:
         if warning_fpm <= 0 or critical_fpm <= warning_fpm:
             raise ValueError("critical_fpm must exceed positive warning_fpm")
         self.warning_fpm = warning_fpm
