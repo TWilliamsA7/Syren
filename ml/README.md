@@ -1,28 +1,58 @@
 # Emergency prediction research pipeline
 
-Use **CPython 3.13.3**. Training runs on the laptop; label generation and the
-exported logistic model's inference require only Python's standard library.
-The current data are three sampled 2024 days plus three separate accident traces.
-No command below downloads ADS-B archives.
+Use **CPython 3.10.0** from `C:\tools\Python310_Custom\python.exe` for the
+local research environment. The deployed logistic inference remains standard
+library-only. The ten-day declaration corpus is development data; it does not
+include an untouched final test date. No command below downloads ADS-B archives.
 
-From the repository root:
+From the repository root, install the pinned dependencies and run the explicit
+ten-day commands below. The legacy three-day artifacts remain available for
+reference; these commands avoid overwriting them.
+
+The ten-day experiment writes into its own ignored research directory and keeps
+the original three-day outputs intact:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m ml.audit_candidates
-.\.venv\Scripts\python.exe -m ml.label_windows
-.\.venv\Scripts\python.exe -m ml.compare_models
-.\.venv\Scripts\python.exe -m ml.bootstrap_report
-.\.venv\Scripts\python.exe -m ml.train_research_model
-.\.venv\Scripts\python.exe -m ml.label_incidents
-.\.venv\Scripts\python.exe -m ml.train_baseline
+.\.venv\Scripts\python.exe -m ml.audit_candidates --output-dir data/learning/ten_day_development
+.\.venv\Scripts\python.exe -m ml.label_windows --episode-target --output-dir data/learning/ten_day_development --audit-file data/learning/ten_day_development/candidate_audit.jsonl
+.\.venv\Scripts\python.exe -m ml.compare_temporal_models --dataset data/learning/ten_day_development/declaration_episode_windows.jsonl --output-dir data/learning/ten_day_development/temporal_episode_comparison
+.\.venv\Scripts\python.exe -m ml.diagnose_temporal_signal
 ```
+
+The signal diagnostic compares event-level feature summaries against sampled
+control flight segments and candidate-aircraft negative segments, then reports
+train-versus-date-validation fit on one fixed fold. It runs no model sweep.
+
+`compare_temporal_models` runs exactly one fixed 3-leaf/100-iteration temporal
+histogram boosted-tree baseline and one compact multi-output 1D CNN. It uses ten leave-one-
+date-out folds and removes any aircraft IDs shared with each validation date
+from that fold's training rows. The CNN sees 31 causal samples at 10-second
+intervals over the preceding five minutes: barometric altitude, groundspeed,
+vertical rate, track sine/cosine, on-ground state, anchor-relative east/north
+path offsets, and validity masks. Continuous values interpolate only across
+gaps up to 30 seconds; larger gaps stay masked. Fold normalization is fitted on
+training rows only. Signals within 60 seconds form one multi-label episode;
+the CNN predicts any declaration plus four common subtype heads. Rare subtype
+labels remain in audit and evaluation metadata. Signal values, subtype labels,
+absolute coordinates, and aircraft identity are never model inputs.
+
+This workflow writes `declaration_episode_windows.jsonl` and its own summary;
+the earlier `declaration_windows.jsonl` artifact is left intact. The output
+includes fold scores, a 201-point alert tradeoff grid at 0.005 score
+steps across the full range (plus a no-alert point), per-date curves, subtype
+counts, and nominal Wilson/Poisson uncertainty intervals. The pooled curve is
+also saved as `event_recall_vs_false_alerts.svg`. A separate
+`sequence_cnn_research_bundle.pt` contains the final
+all-ten-date multi-output research fit and preprocessing metadata. This bundle is not wired
+into deployed inference. AUC is secondary; no operational threshold is selected
+from these same ten dates. New dates collected after model and threshold freeze
+are required for a final evaluation.
 
 ## Declaration proxy
 
 The audit checks every retained candidate against its raw aircraft trace and
-records signal values, onset, coverage, and decision in
-`data/learning/candidate_audit.jsonl`. Its decisions are **automated trace
+records signal values, onset, coverage, and decision in the output directory's
+`candidate_audit.jsonl`. Its decisions are **automated trace
 checks**, not independent confirmation of emergencies. A `lifeguard`-only
 priority status is excluded from the aircraft-distress proxy because it can
 identify a priority medical transport rather than distress aboard that aircraft
@@ -38,9 +68,62 @@ A positive has onset within the following 2–10 minutes; a negative has no
 declaration within a continuously observed 10-minute future. It excludes
 short histories, flight-leg boundaries, observation gaps, and insufficient
 future coverage. Emergency status, squawk, identity, callsign, date, and raw
-coordinates are never model features. The file contains both the original
-17-value `features` and a causal `temporal_features` set with 30-, 60-,
-180-, and 300-second trends, flight phase, and observation quality.
+coordinates are never model features. The file contains the original
+17-value `features`, causal `temporal_features`, and (for the ten-day experiment)
+the 31-step sequence described above.
+
+## Ten-day development results
+
+The audit accepted 290 candidate traces under the ADS-B declaration proxy and
+excluded 58 lifeguard/reserved-only traces. The labeler produced 1321 positive
+windows from 209 eligible declaration events and 136,691 covered negative
+windows. Another 81 included candidate traces had no eligible pre-event window:
+75 lacked 420 seconds of leg history before declaration and 6 had fewer than
+ten points in the matching leg. They are listed in the coverage summary and
+not counted as evaluated events. The sampled controls contributed about 1,729
+observed airborne hours.
+
+The fixed temporal boosted tree had OOF ROC AUC 0.492 and average precision
+0.00965; the CNN had 0.419 and 0.00794, against a 0.00957 positive-window
+fraction. Event-level results were similarly weak: both detected zero events
+at zero observed false alerts; the CNN's first detection was 1 of 209 events at
+5.20 false alerts per 1,000 control airborne hours (warning time 572 seconds),
+while the tree's first detection was 1 of 209 at 28.33 per 1,000 hours (196
+seconds). The corresponding nominal 95% Poisson intervals are 2.38–9.88 and
+20.96–37.46 false alerts per 1,000 hours; event recall for 1/209 has a Wilson
+interval of 0.08%–2.66%. These operating points are curve descriptions, not
+selected thresholds. The full curves and date-level scores are in
+`data/learning/ten_day_development/temporal_comparison/`.
+
+The CNN did not improve the ranking or event tradeoff consistently. Across
+dates its ROC AUC ranged from 0.259 to 0.480; the tree ranged from 0.310 to
+0.573. The next useful work is to inspect why the 81 candidate traces lack
+eligible lead windows and review the 208 missed eligible events and their
+coverage/trajectory patterns. These results do not support expanding the model
+sweep or making an alerting claim. All ten dates were development data.
+
+The follow-up signal audit found similar sequence coverage for positives and
+controls (about 91% valid measurement slots). Its strongest univariate feature
+was vertical-rate availability (event-versus-control flight-segment AUC 0.61),
+while the strongest actual kinematic features were weak and often ranked in the
+opposite direction. Aggregating out-of-fold scores by event and control flight
+segment gave descriptive AUC 0.54 for the tree and 0.47 for the CNN. This
+points away from missing samples as the main cause and toward weak kinematic
+precursors, date/selection effects, and a target that combines different
+actions: 89 `general` declarations, 71 `nordo`, 61 squawk 7700, 39 squawk
+7600, with overlapping subtype counts. The 7500 subtype appears once. The
+summary and feature-level details are in
+`data/learning/ten_day_development/temporal_signal_diagnostics.json`; these
+grouped statistics are descriptive, not a new operating metric.
+
+On the fixed `2025-08-15` diagnostic fold, the tree's in-sample window ROC AUC
+was 0.648 and fell to 0.482 on the held-out date; its average precision fell
+from 0.0177 to 0.0152 (the held-out positive fraction was 0.0157). The CNN
+went from ROC AUC 0.587 to 0.439, and its held-out average precision was also
+at the 0.0157 random-ranking baseline. This single fold is not a final
+estimate, but with the poor ten-date results it points to date/label
+generalization and weak common precursors, rather than a model that simply
+needs more layers.
 
 `ml.compare_models` runs aircraft-disjoint leave-one-date-out development
 folds. It compares unweighted and normalized aircraft-day-balanced losses
@@ -61,6 +144,11 @@ development configuration. `ml.train_research_model` refits that selected
 configuration on all three days and saves a research-only `joblib` artifact;
 logistic selections also get a portable JSON export. The artifact requires
 the pinned scikit-learn runtime for CPU inference if it is a boosted tree.
+The report also includes a nested threshold diagnostic: for each outer date,
+the threshold is selected using cross-fitted scores from only the other two
+dates, then replayed on the outer date. This reduces threshold leakage, but
+the winning configuration is still selected on all three dates and each
+threshold is based on only two inner dates.
 
 ## Verified outcomes
 
@@ -88,10 +176,15 @@ training label. Event dates in the export are not assumed to be UTC.
 
 ## Deployment and acceptance
 
-The current three-day, 56-configuration development sweep selected a 3-leaf,
+The earlier three-day, 56-configuration development sweep selected a 3-leaf,
 100-iteration temporal boosted tree by the specified alert rule. It has
 out-of-fold ROC AUC 0.490, average precision 0.011, and detects 1 of 41
 declaration events at a threshold with zero observed control alerts.
+Under the nested threshold diagnostic, the fixed selected configuration
+detected 0 of 41 events (0% recall), with no warning times to summarize and
+0 false alerts across the same control exposure. The zero count still has a
+95% Poisson upper bound of 7.15 per 1,000 hours. This is a development
+diagnostic, not a final test estimate.
 Only 516 eligible control airborne hours were observed, so the 95% Poisson
 upper bound remains 7.15 false alerts per 1,000 hours. The research model
 is **not accepted for operational alerting**; the larger train-versus-date
@@ -100,12 +193,9 @@ bootstrap intervals are under `data/learning/comparison/`.
 
 `ml.train_baseline` exports a JSON logistic model under
 `data/learning/model/`. `ml.predict.probability` scores it without
-scikit-learn and checks export parity during training. The Orin Nano can run
-this small model on CPU. After copying the research artifact and representative
-window data to the Orin, run `python -m ml.benchmark_inference --model PATH
---dataset PATH` there to record CPU p50/p95/p99 latency. No score is a
-calibrated probability of a real-world
-emergency. Before any alerting claim, select the model and threshold on
-validation data, then replay on newly collected untouched dates and report
-event recall, warning time, and false alerts per 1,000 observed flight-hours
-with uncertainty from independent flights or events.
+scikit-learn and checks export parity during training. No score is a calibrated
+probability of a real-world emergency. Before any alerting claim, select the
+model and threshold on validation data, then replay on newly collected
+untouched dates and report event recall, warning time, and false alerts per
+1,000 observed flight-hours with uncertainty from independent flights or
+events. Device benchmarking is outside this experiment.

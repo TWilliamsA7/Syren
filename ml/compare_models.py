@@ -94,6 +94,77 @@ def poisson_rate_interval(count: int, hours: float) -> list[float] | None:
     return [lower * 1000 / hours, upper * 1000 / hours]
 
 
+def nested_threshold_diagnostic(
+    rows: list[dict], dates: list[str], config: dict,
+) -> dict:
+    """Evaluate per-date thresholds selected without that date's labels or controls.
+
+    For each outer date, cross-fit scores over the other two dates, derive a
+    conservative threshold from those training-date controls, refit on both
+    training dates, and replay the outer date once. Configuration selection is
+    still conditional on the three outer folds and is reported as such.
+    """
+    fold_results = []
+    for validation_date in dates:
+        train_dates = [date for date in dates if date != validation_date]
+        train_rows = [row for row in rows if row["date_utc"] in train_dates]
+        validation = [row for row in rows if row["date_utc"] == validation_date]
+
+        threshold_rows: list[dict] = []
+        threshold_scores: list[float] = []
+        for inner_date in train_dates:
+            inner_validation = [row for row in train_rows if row["date_utc"] == inner_date]
+            inner_aircraft = {row["icao24"] for row in inner_validation}
+            inner_train = [row for row in train_rows
+                           if row["date_utc"] != inner_date and row["icao24"] not in inner_aircraft]
+            _, scores = fit_predict(inner_train, inner_validation, config)
+            threshold_rows.extend(inner_validation)
+            threshold_scores.extend(float(score) for score in scores)
+
+        threshold = conservative_threshold(threshold_rows, threshold_scores)
+        outer_aircraft = {row["icao24"] for row in validation}
+        outer_train = [row for row in train_rows if row["icao24"] not in outer_aircraft]
+        _, outer_scores = fit_predict(outer_train, validation, config)
+        alert = replay(validation, outer_scores, threshold)
+        warning_seconds = alert["warning_seconds"]
+        alert["warning_time_median_seconds"] = (
+            float(np.median(warning_seconds)) if warning_seconds else None
+        )
+        alert["warning_time_p10_seconds"] = (
+            float(np.percentile(warning_seconds, 10)) if warning_seconds else None
+        )
+        alert["false_alert_rate_poisson_95_per_1000h"] = poisson_rate_interval(
+            alert["control_false_alerts"], alert["control_observed_airborne_hours"]
+        )
+        alert["validation_date"] = validation_date
+        alert["threshold_source_dates"] = train_dates
+        fold_results.append(alert)
+
+    events = sum(item["event_count"] for item in fold_results)
+    detected = sum(item["detected_events"] for item in fold_results)
+    alerts = sum(item["control_false_alerts"] for item in fold_results)
+    hours = sum(item["control_observed_airborne_hours"] for item in fold_results)
+    warning_times = [value for item in fold_results for value in item["warning_seconds"]]
+    return {
+        "method": "nested date-level threshold selection; configuration fixed to exploratory winner",
+        "event_count": events,
+        "detected_events": detected,
+        "event_recall": detected / events if events else None,
+        "warning_time_median_seconds": float(np.median(warning_times)) if warning_times else None,
+        "warning_time_p10_seconds": float(np.percentile(warning_times, 10)) if warning_times else None,
+        "control_observed_airborne_hours": hours,
+        "control_false_alerts": alerts,
+        "control_false_alerts_per_1000_hours": alerts * 1000 / hours if hours else None,
+        "control_false_alert_rate_poisson_95_per_1000h": poisson_rate_interval(alerts, hours),
+        "folds": fold_results,
+        "warning": (
+            "Configuration was selected using these same three development dates. "
+            "Thresholds are date-cross-fitted, but two inner dates and sparse control "
+            "hours do not establish future-date performance."
+        ),
+    }
+
+
 def select_development_rows(rows: list[dict], development_dates: tuple[str, ...]) -> list[dict]:
     selected = [row for row in rows if row["date_utc"] in development_dates]
     dates = {row["date_utc"] for row in selected}
@@ -164,6 +235,9 @@ def compare(dataset: Path, output_dir: Path, development_dates: tuple[str, ...] 
         "candidate_count": len(comparisons), "development_dates": dates,
         "selection_rule": "highest event recall at conservative <=1/1000 control flight-hour threshold, then AP, then ROC AUC",
         "best_exploratory": best[1], "best_alert_curve": curve,
+        "nested_threshold_diagnostic_fixed_selected_configuration": nested_threshold_diagnostic(
+            rows, dates, best[1]["configuration"]
+        ),
         "warning": "Threshold and configuration selected on the same development folds; do not use as an operational claim.",
     }
     (output_dir / "comparison.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

@@ -2,7 +2,7 @@
 
 ## Runtime
 
-Use **CPython 3.13.3** (also recorded in the repository's `.python-version`). The data collectors use only the Python standard library; no `requirements.txt`, virtual environment, or package installation is needed. Model-training libraries belong in a later, separate training environment once the collected data and target have been audited.
+Use **CPython 3.10.0** (also recorded in the repository's `.python-version`). The data collectors use only the Python standard library; model training uses the separate local environment described in [`ml/README.md`](../ml/README.md).
 
 ## Whole-day corpus collection
 
@@ -11,7 +11,7 @@ ADSB.lol publishes daily aircraft trace archives through its `globe_history_YYYY
 Example, from the repository root:
 
 ```powershell
-python scripts/collect_adsb_days.py --dates 2024-02-15 2024-05-15 2024-08-15 2024-11-15 2025-02-15 2025-05-15 2025-08-15 2025-11-15
+python scripts/collect_adsb_days.py --dates 2024-02-15 2024-05-15 2024-08-15 2024-11-15 2025-02-15 2025-05-15 2025-08-15 2025-11-15 2026-02-15 2026-05-15
 ```
 
 Outputs are local and git-ignored under `data/collection/`:
@@ -33,6 +33,8 @@ An `observed_adsb_emergency_signal` is a weak label grounded in an explicit tran
 `unlabeled_no_observed_declaration` is a sampled trace with no matching signal. It is **not** a verified normal-flight negative. Controls are sampled aircraft-days, not balanced by event, region, phase of flight, aircraft type, or ADS-B coverage. They are useful for exploratory review and initial feature-pipeline validation, not yet for calibrated risk or performance claims.
 
 The catalog in `events.json` separately records reported accident and in-flight emergency outcomes. Outcome involvement, ADS-B declaration, and precursor-to-event are different targets. Do not label every point from an event aircraft as positive. The separate declaration and verified-incident labelers, candidate audit, model comparison, and alert replay are documented in [`ml/README.md`](../ml/README.md). Incident controls remain weak negatives until independently reviewed; ambiguous and missing cases are retained in the coverage report rather than silently assigned negative labels.
+
+For the ten-day temporal research comparison, run `python -m ml.label_windows --episode-target` to write a separate `declaration_episode_windows.jsonl` file. It groups usable signal transitions no more than 60 seconds after the episode's first signal, keeps later transitions as separate episodes, and records subtype-specific targets for upcoming episodes. This avoids assigning every signal observed in an aircraft-day to its first signal time. The earlier single-onset output remains intact. The CNN uses causal, anchor-relative path offsets rather than absolute coordinates; signal labels and absolute coordinates are not input features.
 
 For a serious predictive dataset, expand collection across randomly selected dates, geographies, seasons, and years; add independently verified incident, accident, diversion, and emergency-report sources; deduplicate aircraft-days and events; review false/missed ADS-B declarations; and split evaluation by date/event/aircraft to prevent leakage. The day sample is a collection pilot, not evidence that ADS-B alone can predict emergencies.
 
