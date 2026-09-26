@@ -22,7 +22,7 @@ _export_lock = threading.Lock()  # one export at a time; starting the same hour 
 _generation = 0  # bumped by every start and stop, so an old background thread knows to quit
 _player = None
 _status = {"state": "idle", "date": None, "clock": None, "first": None, "last": None,
-           "done_bytes": 0, "total_bytes": 0, "error": None}
+           "done_bytes": 0, "total_bytes": 0, "export_done": 0, "export_total": 0, "error": None}
 
 
 # (timestamp, icao24) of one FlightState JSON line.
@@ -96,11 +96,15 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
                 generation, done_bytes=done, total_bytes=total))
         export = os.path.join(root, "exports", f"{date}_{start.replace(':', '')}_{hours:g}h.jsonl.gz")
         if not os.path.exists(export):
-            if not _set(generation, state="exporting"):
+            if not _set(generation, state="exporting", export_done=0, export_total=1):
                 return
             with _export_lock:
                 if not os.path.exists(export):  # another start may have just made it
-                    export_day(date, export, start, hours, root=root)
+                    def on_export_progress(done, total):
+                        _set(generation, export_done=done, export_total=total)
+                    export_day(date, export, start, hours, root=root, on_progress=on_export_progress)
+        
+        _set(generation, state="loading_player")
         player = Player(export)
         with _lock:
             if generation != _generation:
@@ -132,7 +136,7 @@ def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
         _generation += 1
         _player = None
         _status.update(state="loading", date=date, clock=None, first=None, last=None,
-                       done_bytes=0, total_bytes=0, error=None)
+                       done_bytes=0, total_bytes=0, export_done=0, export_total=1, error=None)
         generation = _generation
         write_snapshot([], out_path)
     threading.Thread(target=_run, daemon=True,

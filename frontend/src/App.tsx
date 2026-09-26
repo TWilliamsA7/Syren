@@ -492,107 +492,115 @@ function App() {
                 <button 
                   type="button" 
                   onClick={() => skipTime(-300)}
-                  disabled={!historyMode}
-                  style={{ backgroundColor: historyMode ? '#334155' : '#1e293b', color: historyMode ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode ? 'pointer' : 'not-allowed' }}>
+                  disabled={!historyMode || historyStatusInfo.state !== 'playing'}
+                  style={{ backgroundColor: historyMode && historyStatusInfo.state === 'playing' ? '#334155' : '#1e293b', color: historyMode && historyStatusInfo.state === 'playing' ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode && historyStatusInfo.state === 'playing' ? 'pointer' : 'not-allowed' }}>
                   &lt;&lt; Go back (-5m)
                 </button>
                 <button 
                   type="button" 
                   onClick={() => skipTime(300)}
-                  disabled={!historyMode}
-                  style={{ backgroundColor: historyMode ? '#334155' : '#1e293b', color: historyMode ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode ? 'pointer' : 'not-allowed' }}>
+                  disabled={!historyMode || historyStatusInfo.state !== 'playing'}
+                  style={{ backgroundColor: historyMode && historyStatusInfo.state === 'playing' ? '#334155' : '#1e293b', color: historyMode && historyStatusInfo.state === 'playing' ? '#f8fafc' : '#64748b', border: '1px solid var(--border)', padding: '0.35rem', borderRadius: '0.375rem', fontSize: '0.7rem', cursor: historyMode && historyStatusInfo.state === 'playing' ? 'pointer' : 'not-allowed' }}>
                   Go forward (+5m) &gt;&gt;
                 </button>
               </div>
             </form>
           </div>
 
-          {/* REPLAY STATUS PANEL */}
-          {historyMode && (
-            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--accent)', borderRadius: '0.5rem', padding: '1.25rem' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--accent)', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Replay Status</div>
-              <div style={{ fontSize: '0.8125rem', color: 'var(--text-main)', marginBottom: '0.5rem' }}>
-                State: <strong style={{ textTransform: 'uppercase' }}>{historyStatusInfo.state}</strong>
+          {/* MULTISTAGE REPLAY PROGRESS PANEL */}
+          {historyMode && historyStatusInfo.state !== 'playing' && historyStatusInfo.state !== 'stopped' && (
+            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--accent)', borderRadius: '0.5rem', padding: '1.25rem', marginBottom: '1rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--accent)', fontWeight: '700', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
+                Multistage Pipeline Progress
               </div>
               
-              {/* Progress Bar for Downloading State */}
-              {historyStatusInfo.state === 'downloading' && (
-                <div style={{ marginBottom: '0.75rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
-                    <span>Downloading Archive...</span>
-                    <span>
-                      {historyStatusInfo.total_bytes > 0 
-                        ? `${Math.round((historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100)}%` 
-                        : '0%'}
-                    </span>
-                  </div>
-                  <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
-                    <div 
-                      style={{ 
-                        width: `${historyStatusInfo.total_bytes > 0 ? (historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100 : 0}%`, 
-                        height: '100%', 
-                        backgroundColor: 'var(--accent)',
-                        transition: 'width 0.2s ease-in-out'
-                      }} 
-                    />
-                  </div>
-                  <div style={{ fontSize: '0.65rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                    {(historyStatusInfo.done_bytes / 1e9).toFixed(2)} GB / {(historyStatusInfo.total_bytes / 1e9).toFixed(2)} GB
-                  </div>
+              {/* Stage 1: Downloading */}
+              <div style={{ marginBottom: '0.875rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: historyStatusInfo.state === 'downloading' ? 'var(--accent)' : 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                  <span>1. Downloading Archive from GitHub</span>
+                  <span>
+                    {historyStatusInfo.total_bytes > 0 
+                      ? `${Math.round((historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100)}%` 
+                      : historyStatusInfo.state === 'downloading' ? '0%' : '100%'}
+                  </span>
                 </div>
-              )}
-
-              {historyStatusInfo.state === 'exporting' && (
-                <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
-                  Exporting day traces to jsonl...
+                <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
+                  <div 
+                    style={{ 
+                      width: `${historyStatusInfo.total_bytes > 0 ? (historyStatusInfo.done_bytes / historyStatusInfo.total_bytes) * 100 : (historyStatusInfo.state === 'downloading' ? 0 : 100)}%`, 
+                      height: '100%', 
+                      backgroundColor: 'var(--accent)',
+                      transition: 'width 0.2s ease-in-out'
+                    }} 
+                  />
                 </div>
-              )}
+              </div>
 
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
-                Replay Clock: <strong style={{ color: 'var(--accent)' }}>{replayClockFormatted || 'Syncing...'}</strong>
+              {/* Stage 2: Exporting to Frontend / Parsing */}
+              <div style={{ marginBottom: '0.75rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: historyStatusInfo.state === 'exporting' ? 'var(--accent)' : 'var(--text-muted)', marginBottom: '0.25rem' }}>
+                  <span>2. Exporting & Rendering to Frontend</span>
+                  <span>
+                    {historyStatusInfo.export_total > 0 
+                      ? `${Math.round((historyStatusInfo.export_done / historyStatusInfo.export_total) * 100)}%` 
+                      : '0%'}
+                  </span>
+                </div>
+                <div style={{ width: '100%', height: '6px', backgroundColor: '#1e293b', borderRadius: '3px', overflow: 'hidden' }}>
+                  <div 
+                    style={{ 
+                      width: `${historyStatusInfo.export_total > 0 ? (historyStatusInfo.export_done / historyStatusInfo.export_total) * 100 : 0}%`, 
+                      height: '100%', 
+                      backgroundColor: 'var(--green)',
+                      transition: 'width 0.2s ease-in-out'
+                    }} 
+                  />
+                </div>
+              </div>
+
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                Current Status: <strong style={{ textTransform: 'uppercase', color: 'var(--text-main)' }}>{historyStatusInfo.state}</strong> (Controls unlock once playing)
               </div>
             </div>
           )}
 
-          {/* LIVE FEED INFO PANEL */}
-          {!historyMode && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
-              <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>
-                  Current US Airspace Volume
-                </div>
-                <div style={{ fontSize: '2rem', fontWeight: '800', color: 'var(--accent)' }}>{aircraftList.length.toLocaleString()}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active transponders rendering on Deck.GL</div>
+          {/* PERSISTENT AIRSPACE VOLUME & ANOMALY STATUS COMPONENTS */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
+            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem' }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>
+                Current US Airspace Volume
               </div>
+              <div style={{ fontSize: '2rem', fontWeight: '800', color: 'var(--accent)' }}>{aircraftList.length.toLocaleString()}</div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>Active transponders rendering on Deck.GL</div>
+            </div>
 
-              <div style={{ 
-                backgroundColor: 'var(--bg-sidebar)', 
-                border: `1px solid ${hasFeedAnomaly ? 'var(--red)' : 'var(--green)'}`, 
-                borderRadius: '0.5rem', 
-                padding: '1.25rem' 
-              }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Overall Feed Anomaly Status</div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.125rem', fontWeight: '700', color: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}>
-                  <span style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}></span>
-                  {hasFeedAnomaly ? 'ALERT: Emergency Squawk Detected' : 'All US Telemetry Nominal'}
-                </div>
-              </div>
-
-              <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem', fontSize: '0.8125rem' }}>
-                <div style={{ fontWeight: '700', color: 'var(--text-main)', marginBottom: '0.75rem' }}>Telemetry System Metadata</div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>
-                  <span>Query Timestamp:</span>
-                  <strong style={{ color: 'var(--text-main)' }}>{lastUpdated}</strong>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
-                  <span>API Status:</span>
-                  <strong style={{ color: isLive ? 'var(--green)' : 'var(--red)' }}>
-                    {isLive ? 'No error' : 'COOKED (Offline)'}
-                  </strong>
-                </div>
+            <div style={{ 
+              backgroundColor: 'var(--bg-sidebar)', 
+              border: `1px solid ${hasFeedAnomaly ? 'var(--red)' : 'var(--green)'}`, 
+              borderRadius: '0.5rem', 
+              padding: '1.25rem' 
+            }}>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Overall Feed Anomaly Status</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.125rem', fontWeight: '700', color: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}>
+                <span style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: hasFeedAnomaly ? 'var(--red)' : 'var(--green)' }}></span>
+                {hasFeedAnomaly ? 'ALERT: Emergency Squawk Detected' : 'All US Telemetry Nominal'}
               </div>
             </div>
-          )}
+
+            <div style={{ backgroundColor: 'var(--bg-sidebar)', border: '1px solid var(--border)', borderRadius: '0.5rem', padding: '1.25rem', fontSize: '0.8125rem' }}>
+              <div style={{ fontWeight: '700', color: 'var(--text-main)', marginBottom: '0.75rem' }}>Telemetry System Metadata</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-muted)' }}>
+                <span>Query Timestamp:</span>
+                <strong style={{ color: 'var(--text-main)' }}>{lastUpdated}</strong>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)' }}>
+                <span>API Status:</span>
+                <strong style={{ color: isLive ? 'var(--green)' : 'var(--red)' }}>
+                  {isLive ? 'No error' : 'COOKED (Offline)'}
+                </strong>
+              </div>
+            </div>
+          </div>
 
           {/* SEARCHED AIRCRAFT */}
           {searchedAircraft && viewMode === 'search_result' && (
