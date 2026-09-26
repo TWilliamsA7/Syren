@@ -9,6 +9,3 @@ __pycache__/
 data/generated/
 data/archive/
 node_modules
-
-data/archive/
-data/generated/
