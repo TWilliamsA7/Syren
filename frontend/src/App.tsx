@@ -105,12 +105,14 @@ function App() {
   // Poll history_status if history mode is active
   useEffect(() => {
     let statusTimer: NodeJS.Timeout;
+    let cancelled = false;  // set on cleanup, so a fetch still in flight can't keep an old loop going
     if (historyMode) {
       const pollStatus = async () => {
         try {
           const res = await fetch('/api/history_status', { cache: 'no-store' });
           if (res.ok) {
             const data = await res.json();
+            if (cancelled) return;
             setHistoryStatusInfo(data);
             if (data.clock) {
               const dateObj = new Date(data.clock * 1000);
@@ -120,24 +122,29 @@ function App() {
         } catch (e) {
           console.error("Failed to fetch history status", e);
         }
-        statusTimer = setTimeout(pollStatus, 1000);
+        if (!cancelled) statusTimer = setTimeout(pollStatus, 1000);
       };
       pollStatus();
     }
-    return () => clearTimeout(statusTimer);
+    return () => {
+      cancelled = true;
+      clearTimeout(statusTimer);
+    };
   }, [historyMode]);
 
   // Poll data file continuously (/history.jsonl if historyMode, else /data.jsonl)
   useEffect(() => {
     let timer: NodeJS.Timeout;
+    let cancelled = false;  // set on cleanup, so a fetch still in flight can't keep an old loop going
 
     const fetchData = async () => {
       try {
         const endpoint = historyMode ? '/history.jsonl' : '/data.jsonl';
         const response = await fetch(endpoint, { cache: 'no-store' });
         if (!response.ok) throw new Error('Failed to fetch data file');
-        
+
         const rawText = await response.text();
+        if (cancelled) return;
         const rawApiResponse = parseJsonData(rawText);
 
         const parsedData: Aircraft[] = rawApiResponse.map((item: any) => ({
@@ -160,13 +167,14 @@ function App() {
         }));
 
         setAircraftList(parsedData);
-        setIsLive(!historyMode);
+        setIsLive(true);  // COOKED only when the fetch fails, not during every replay
         setLastUpdated(new Date().toUTCString());
         consecutiveFailuresRef.current = 0;
 
         // Schedule next standard check interval (1 second)
         timer = setTimeout(fetchData, 1000);
       } catch (err) {
+        if (cancelled) return;
         consecutiveFailuresRef.current += 1;
 
         if (consecutiveFailuresRef.current === 1) {
@@ -180,7 +188,10 @@ function App() {
 
     fetchData();
 
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [historyMode]);
 
   // Backend API Call Handlers for History Controls

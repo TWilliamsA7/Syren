@@ -12,8 +12,8 @@ import os
 from data.history import ARCHIVE_DIR, day_dir
 from shared.flight_state import make_flight_state, round_track, validate_flight_state
 
-ORLANDO = (28.4, -81.3)  # same area as the live feed
-RADIUS_NM = 100
+CENTER = (38.0, -96.0)  # same area as the live feed in data/live_adapter.py: the whole US
+RADIUS_NM = 1450
 
 # bits of point[6]
 STALE = 1      # no position for 20+ s before this point
@@ -23,15 +23,17 @@ GEOM_ALT = 8   # point[3] is GPS altitude, not baro
 
 
 # open() for .jsonl and gzip.open() for .jsonl.gz, so callers don't care which it is.
+# Level 1 compression is several times faster to write than the default, for a slightly bigger file.
 def open_jsonl(path, mode="rt"):
     if path.endswith(".gz"):
-        return gzip.open(path, mode)
+        return gzip.open(path, mode, compresslevel=1)
     return open(path, mode)
 
 
-# Every point in one trace_full file as a FlightState, oldest first.
-# Callsign, squawk etc. only come every few points in point[8], so the last ones are reused.
-def parse_trace(path):
+# Every point in one trace_full file as a FlightState, oldest first, or only the points where
+# keep(timestamp, lat, lon) is true. Callsign, squawk etc. only come every few points in
+# point[8], so the last ones are reused, even when they came on a point that isn't kept.
+def parse_trace(path, keep=None):
     with gzip.open(path) as f:
         trace = json.load(f)
     details = {}
@@ -45,6 +47,9 @@ def parse_trace(path):
             details = {}  # a new flight: don't carry the last one's callsign or squawk
         if new_details:
             details = {**details, **new_details}
+        timestamp = round(trace["timestamp"] + seconds, 3)
+        if keep is not None and not keep(timestamp, lat, lon):
+            continue
 
         on_ground = altitude == "ground"
         altitude_baro = None if on_ground else altitude
@@ -59,7 +64,7 @@ def parse_trace(path):
                 rate_geom = rate
 
         states.append(make_flight_state(
-            timestamp=round(trace["timestamp"] + seconds, 3),
+            timestamp=timestamp,
             icao24=trace["icao"],
             flight_id=details.get("flight"),
             registration=trace.get("r"),
@@ -85,34 +90,35 @@ def parse_trace(path):
     return states
 
 
-# Rough distance in nautical miles, fine for a few hundred miles.
+# Great-circle distance in nautical miles, like the radius of adsb.lol's live query.
 def _distance_nm(lat1, lon1, lat2, lon2):
-    north = (lat2 - lat1) * 60
-    east = (lon2 - lon1) * 60 * math.cos(math.radians((lat1 + lat2) / 2))
-    return math.hypot(north, east)
+    lat1, lon1, lat2, lon2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    a = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 2 * 3440.065 * math.asin(math.sqrt(a))
 
 
-# One trace file's valid states inside the time window and the circle, plus how many
-# states were dropped as invalid. Runs in a worker process.
-def _states_in_area(path, start_s, end_s, lat, lon, radius_nm):
+# One trace file's valid states inside the time window and the circle, as
+# (timestamp, icao24, JSON line), plus how many were dropped as invalid. Runs in a worker
+# process, which also turns the states into JSON so the main process doesn't have to.
+def _lines_in_area(path, start_s, end_s, lat, lon, radius_nm):
+    def keep(timestamp, point_lat, point_lon):
+        return (start_s <= timestamp < end_s
+                and _distance_nm(lat, lon, point_lat, point_lon) <= radius_nm)
+
     kept, dropped = [], 0
-    for state in parse_trace(path):
-        position = state["position"]
-        if not start_s <= state["timestamp"] < end_s:
-            continue
-        if _distance_nm(lat, lon, position["latitude"], position["longitude"]) > radius_nm:
-            continue
+    for state in parse_trace(path, keep):
         if validate_flight_state(state):
             dropped += 1
         else:
-            kept.append(state)
+            kept.append((state["timestamp"], state["icao24"], json.dumps(state) + "\n"))
     return kept, dropped
 
 
 # Write every aircraft's states inside the circle from start ("HH:MM" UTC) for hours
 # into out_path, sorted by time. The day must be on disk. Returns (states, aircraft) counts.
 # Reads all ~80k trace files of the day, spread over every CPU core.
-def export_day(date, out_path, start="16:00", hours=1.0, lat=ORLANDO[0], lon=ORLANDO[1],
+def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENTER[1],
                radius_nm=RADIUS_NM, root=ARCHIVE_DIR):
     folder = day_dir(date, root)
     if folder is None:
@@ -122,24 +128,26 @@ def export_day(date, out_path, start="16:00", hours=1.0, lat=ORLANDO[0], lon=ORL
     midnight = datetime.datetime.fromisoformat(date).replace(tzinfo=datetime.timezone.utc)
     start_time = datetime.time.fromisoformat(start)
     start_s = midnight.timestamp() + start_time.hour * 3600 + start_time.minute * 60
-    in_area = functools.partial(_states_in_area, start_s=start_s, end_s=start_s + hours * 3600,
+    in_area = functools.partial(_lines_in_area, start_s=start_s, end_s=start_s + hours * 3600,
                                 lat=lat, lon=lon, radius_nm=radius_nm)
 
     files = glob.glob(os.path.join(folder, "traces", "*", "trace_full_*.json"))
-    states, dropped = [], 0
+    rows, dropped = [], 0
     with concurrent.futures.ProcessPoolExecutor() as pool:
         for kept, bad in pool.map(in_area, files, chunksize=200):
-            states.extend(kept)
+            rows.extend(kept)
             dropped += bad
-    states.sort(key=lambda state: state["timestamp"])
+    rows.sort(key=lambda row: row[0])
 
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open_jsonl(out_path, "wt") as out:
-        for state in states:
-            out.write(json.dumps(state) + "\n")
-    aircraft = len({state["icao24"] for state in states})
-    print(f"{len(states)} states from {aircraft} aircraft -> {out_path} ({dropped} invalid dropped)")
-    return len(states), aircraft
+    folder, name = os.path.split(out_path)
+    temporary = os.path.join(folder, "partial_" + name)  # renamed once complete, so a killed
+    os.makedirs(folder or ".", exist_ok=True)              # export never looks finished
+    with open_jsonl(temporary, "wt") as out:
+        out.writelines(line for _, _, line in rows)
+    os.replace(temporary, out_path)
+    aircraft = len({icao24 for _, icao24, _ in rows})
+    print(f"{len(rows)} states from {aircraft} aircraft -> {out_path} ({dropped} invalid dropped)")
+    return len(rows), aircraft
 
 
 if __name__ == "__main__":
@@ -148,8 +156,8 @@ if __name__ == "__main__":
     parser.add_argument("out", help="output file, .jsonl or .jsonl.gz")
     parser.add_argument("--start", default="16:00", help="UTC start time, HH:MM (default 16:00)")
     parser.add_argument("--hours", type=float, default=1.0)
-    parser.add_argument("--lat", type=float, default=ORLANDO[0])
-    parser.add_argument("--lon", type=float, default=ORLANDO[1])
+    parser.add_argument("--lat", type=float, default=CENTER[0])
+    parser.add_argument("--lon", type=float, default=CENTER[1])
     parser.add_argument("--radius", type=float, default=RADIUS_NM, help="nautical miles")
     args = parser.parse_args()
     export_day(args.date, args.out, args.start, args.hours, args.lat, args.lon, args.radius)
