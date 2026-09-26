@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 
 ARCHIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "archive")
-FIXED_DAYS = ["2026-09-24", "2026-09-25"]
+FIXED_DAYS = ["2024-07-20", "2026-09-25"]
 FIRST_DAY = "2023-02-16" 
 REPO_YEARS = range(2023, 2027) 
 RELEASE_API = "https://api.github.com/repos/adsblol/globe_history_{year}/releases/tags/{tag}"

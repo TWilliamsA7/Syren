@@ -76,7 +76,10 @@ def test_export_day():
         write_trace(day, "b00001", [point(16 * 3600 + 5, lat=51.5, lon=-0.1)])  # London, outside the US
 
         out_path = os.path.join(root, "exports", "day.jsonl.gz")
-        counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root)
+        progress = []
+        counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root,
+                            on_progress=lambda done, total: progress.append((done, total)))
+        assert progress[-1] == (3, 3), "the last progress report is all 3 trace files"
         with open_jsonl(out_path) as f:
             states = [json.loads(line) for line in f]
 

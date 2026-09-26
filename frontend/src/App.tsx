@@ -333,6 +333,7 @@ function App() {
     );
     if (found) {
       setFindError('');
+      setFindQuery('');
       followAircraft(found, true);
     } else {
       setFindError(`${findQuery.trim()} isn't in the ${historyMode ? 'replay' : 'live feed'} right now.`);

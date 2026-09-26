@@ -14,6 +14,7 @@ from shared.flight_state import make_flight_state, round_track, validate_flight_
 
 CENTER = (38.0, -96.0)  # same area as the live feed in data/live_adapter.py: the whole US
 RADIUS_NM = 1450
+PROGRESS_EVERY_FILES = 500  # how often export_day reports progress, out of ~80k trace files
 
 # bits of point[6]
 STALE = 1      # no position for 20+ s before this point
@@ -117,9 +118,10 @@ def _lines_in_area(path, start_s, end_s, lat, lon, radius_nm):
 
 # Write every aircraft's states inside the circle from start ("HH:MM" UTC) for hours
 # into out_path, sorted by time. The day must be on disk. Returns (states, aircraft) counts.
-# Reads all ~80k trace files of the day, spread over every CPU core.
+# Reads all ~80k trace files of the day, spread over every CPU core, calling
+# on_progress(files_done, files_total) along the way if given.
 def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENTER[1],
-               radius_nm=RADIUS_NM, root=ARCHIVE_DIR):
+               radius_nm=RADIUS_NM, root=ARCHIVE_DIR, on_progress=None):
     folder = day_dir(date, root)
     if folder is None:
         raise LookupError(f"{date} is not on disk, get it with: python3 -m data.history swap {date}")
@@ -134,9 +136,11 @@ def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENT
     files = glob.glob(os.path.join(folder, "traces", "*", "trace_full_*.json"))
     rows, dropped = [], 0
     with concurrent.futures.ProcessPoolExecutor() as pool:
-        for kept, bad in pool.map(in_area, files, chunksize=200):
+        for done, (kept, bad) in enumerate(pool.map(in_area, files, chunksize=200), 1):
             rows.extend(kept)
             dropped += bad
+            if on_progress is not None and (done % PROGRESS_EVERY_FILES == 0 or done == len(files)):
+                on_progress(done, len(files))
     rows.sort(key=lambda row: row[0])
 
     folder, name = os.path.split(out_path)
