@@ -5,8 +5,9 @@
 *.pyc
 __pycache__/
 
-# Downloaded ADS-B traces and generated datasets
+# Downloaded ADS-B traces, daily archive scratch files, and collection outputs
 data/
+!data/README.md
 
 # Python Version
 .python-version
