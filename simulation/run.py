@@ -1,6 +1,7 @@
 import copy
 import json
 import sys
+import random
 
 from shared.flight_state import validate_flight_state
 from simulation.anomalies import apply_anomalies, check_anomalies, ground_truth
@@ -15,18 +16,22 @@ def load_scenario(path):
         return json.load(f)
 
 
-def _depart(flight):
+def depart(flight, noise_seed=None):
     plan = FlightPlan(
         origin=AIRPORTS[flight["origin"]],
         destination=AIRPORTS[flight["destination"]],
         cruise_altitude_ft=flight["cruise_altitude_ft"],
         cruise_speed_kts=flight.get("cruise_speed_kts", 450),
         squawk=flight.get("squawk", "1200"),
+        climb_rate_fpm=flight.get("climb_rate_fpm", 2000),
+        descent_rate_fpm=flight.get("descent_rate_fpm", 2000),
     )
     ac = plan.spawn(
         flight["icao24"], flight["callsign"], flight["type_code"],
         flight.get("category", "A3"),
     )
+    if noise_seed is not None:
+        ac.rng = random.Random(f"{noise_seed}-{flight['icao24']}")
     return plan, ac
 
 
@@ -51,7 +56,7 @@ def run_scenario(scenario):
     for tick in range(int(scenario["duration_s"] / dt) + 1):
         t = tick * dt
         while waiting and waiting[0]["depart_at_s"] <= t:
-            active.append(_depart(waiting.pop(0)))
+             active.append(depart(waiting.pop(0), scenario.get("noise_seed")))
 
         for plan, ac in active:
             plan.update(ac)

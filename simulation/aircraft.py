@@ -1,4 +1,5 @@
 import math 
+import random
 from dataclasses import dataclass 
 
 from shared.flight_state import (
@@ -40,6 +41,7 @@ class SimAircraft:
     climb_rate_fpm: float = 2000.0
     descent_rate_fpm: float = 2000.0
     transponder_on: bool = True
+    rng: random.Random | None = None
 
 
     def _desired_vertical_rate(self):
@@ -79,6 +81,13 @@ class SimAircraft:
         self.longitude += east_nm / (NM_PER_DEG_LAT * math.cos(math.radians(self.latitude)))
         self.altitude_ft += self.vertical_rate_fpm * dt / 60
 
+
+    def _noisy(self, value, sigma):
+        if self.rng is None or self.on_ground:
+            return value
+        return value + self.rng.gauss(0, sigma)
+
+
     def to_flight_state(self, timestamp):
         return make_flight_state(
             timestamp=round(timestamp, 3),
@@ -89,13 +98,13 @@ class SimAircraft:
             category=self.category,
             latitude=round(self.latitude, 6),
             longitude=round(self.longitude, 6),
-            altitude_baro_ft=None if self.on_ground else round_altitude(self.altitude_ft),
+            altitude_baro_ft=None if self.on_ground else round_altitude(self._noisy(self.altitude_ft, 15)),
             on_ground=self.on_ground,
             source="adsb_icao",
             accuracy_m=186,
-            ground_speed_kts=round(self.speed_kts, 1),
-            track_deg=round_track(self.track_deg),
-            vertical_rate_baro_fpm=round_vertical_rate(self.vertical_rate_fpm),
+            ground_speed_kts=round(max(0.0, self._noisy(self.speed_kts, 1.5)), 1),
+            track_deg=round_track(self._noisy(self.track_deg, 0.3)),
+            vertical_rate_baro_fpm=round_vertical_rate(self._noisy(self.vertical_rate_fpm, 50)),
             selected_altitude_ft=self.selected_altitude_ft,
             squawk=self.squawk,
             emergency=self.emergency,

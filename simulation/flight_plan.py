@@ -41,6 +41,8 @@ class FlightPlan:
     cruise_altitude_ft: float
     cruise_speed_kts: float = 450
     squawk: str = "1200"
+    climb_rate_fpm: float = 2000
+    descent_rate_fpm: float = 2000
     phase: str = "takeoff"
 
     def spawn(self, icao24, callsign, type_code, category="A3"):
@@ -99,8 +101,8 @@ class FlightPlan:
 
         ac.target_track_deg = bearing if distance_nm > 1 else None
         ac.target_vertical_rate_fpm = None
-        ac.climb_rate_fpm = 2000
-        ac.descent_rate_fpm = 2000
+        ac.climb_rate_fpm = self.climb_rate_fpm
+        ac.descent_rate_fpm = self.descent_rate_fpm
 
         if self.phase == "takeoff":
             ac.selected_altitude_ft = self.cruise_altitude_ft
