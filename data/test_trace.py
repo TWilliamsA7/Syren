@@ -52,6 +52,17 @@ def test_parse_trace():
     assert new_leg["status"]["squawk"] is None and new_leg["position"]["source"] == "mlat"
 
 
+def test_parse_trace_keeps_details_from_skipped_points():
+    with tempfile.TemporaryDirectory() as root:
+        path = write_trace(root, "a80595", [
+            point(60, details={"flight": "DAL123", "squawk": "3456"}),
+            point(65),
+        ])
+        states = parse_trace(path, keep=lambda timestamp, lat, lon: timestamp >= MIDNIGHT + 65)
+    assert [state["timestamp"] for state in states] == [MIDNIGHT + 65]
+    assert states[0]["flight_id"] == "DAL123" and states[0]["status"]["squawk"] == "3456"
+
+
 def test_export_day():
     with tempfile.TemporaryDirectory() as root:
         day = os.path.join(root, "fixed", "2026-09-24")
@@ -62,7 +73,7 @@ def test_export_day():
             point(17 * 3600),          # the window ends at 17:00
         ])
         write_trace(day, "abc10c", [point(16 * 3600 + 5)])
-        write_trace(day, "b00001", [point(16 * 3600 + 5, lat=25.8, lon=-80.3)])  # Miami, too far
+        write_trace(day, "b00001", [point(16 * 3600 + 5, lat=51.5, lon=-0.1)])  # London, outside the US
 
         out_path = os.path.join(root, "exports", "day.jsonl.gz")
         counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root)
@@ -70,6 +81,7 @@ def test_export_day():
             states = [json.loads(line) for line in f]
 
         assert counts == (3, 2)
+        assert os.listdir(os.path.dirname(out_path)) == ["day.jsonl.gz"], "no partial file left"
         assert [(state["icao24"], state["timestamp"]) for state in states] == [
             ("abc10c", FOUR_PM + 5), ("a80595", FOUR_PM + 10), ("a80595", FOUR_PM + 1800)]
 
@@ -82,5 +94,6 @@ def test_export_day():
 
 if __name__ == "__main__":
     test_parse_trace()
+    test_parse_trace_keeps_details_from_skipped_points()
     test_export_day()
     print("all tests passed")

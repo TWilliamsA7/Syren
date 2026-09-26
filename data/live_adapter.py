@@ -16,6 +16,11 @@ def parse_aircraft(ac, now_s):
 
     seen_pos = ac.get("seen_pos", 0.0)
     on_ground = ac.get("alt_baro") == "ground"
+    
+    # Skip over any aircraft that are on the ground
+    if on_ground:
+        return None
+
     track = ac.get("track")
     if track is None and on_ground:
         track = ac.get("true_heading")
@@ -75,7 +80,7 @@ if __name__ == "__main__":
         while True:
             start_time = time.time()
             try:
-                states = fetch_live(ADSB_LOL_URL, 28.4, -81.3, 100)
+                states = fetch_live(ADSB_LOL_URL, 38.0, -96.0, 1450)
                 
                 # Write atomically or directly to the target file path
                 with open(out_path, "w") as out:
@@ -88,7 +93,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S Fehler')}] Error fetching/writing live data: {e}", file=sys.stderr)
 
-            # Sleep for the remainder of the 2-second window
+            # Sleep for the remainder of the 5-second window
             elapsed = time.time() - start_time
             sleep_time = max(5.0, 5.0 - elapsed)
             time.sleep(sleep_time)
