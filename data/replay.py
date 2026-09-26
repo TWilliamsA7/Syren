@@ -118,6 +118,7 @@ def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
         _status.update(state="loading", date=date, clock=None, first=None, last=None,
                        done_bytes=0, total_bytes=0, error=None)
         generation = _generation
+        write_snapshot([], out_path)
     threading.Thread(target=_run, daemon=True,
                      args=(generation, date, start, hours, speed, interval_s, out_path, root)).start()
 
