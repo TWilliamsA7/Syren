@@ -16,4 +16,14 @@ data/events.json
 data/raw/
 node_modules
 
+# Pycache
+*.pyc
+__pycache__/
+
+# Local datasets, downloaded traces, and collection outputs
+data/*
+!data/README.md
+
+tmp/
+
 tmp/
