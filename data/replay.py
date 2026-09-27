@@ -190,6 +190,36 @@ def write_snapshot(lines, out_path):
             time.sleep(0.05 * (2 ** attempt))
 
 
+def _publish_snapshot(generation, revision, target, temporary, out_path):
+    """Replace the visible snapshot, retrying transient Windows reader locks."""
+    for attempt in range(5):
+        with _lock:
+            if generation != _generation or revision != _seek_revision:
+                try:
+                    os.remove(temporary)
+                except FileNotFoundError:
+                    pass
+                return False
+            try:
+                os.replace(temporary, out_path)
+            except PermissionError:
+                pass
+            else:
+                global _seek_target
+                _status["clock"] = target
+                _status["state"] = "playing"
+                _status["seeking"] = False
+                _seek_target = target
+                return True
+        if attempt < 4:
+            time.sleep(0.05 * (2 ** attempt))
+    try:
+        os.remove(temporary)
+    except FileNotFoundError:
+        pass
+    return False
+
+
 # Update the status, unless a newer start or stop has replaced this thread. Returns False then.
 def _set(generation, **fields):
     with _lock:
@@ -250,31 +280,11 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
             temporary = out_path + f".{generation}.{revision}.tmp"
             with open(temporary, "w") as out:
                 out.writelines(lines)
-            with _lock:
-                if generation != _generation:
-                    try:
-                        os.remove(temporary)
-                    except FileNotFoundError:
-                        pass
-                    return
-                if revision == _seek_revision and os.path.exists(temporary):
-                    try:
-                        os.replace(temporary, out_path)
-                        _status["clock"] = target
-                        _status["state"] = "playing"
-                        _status["seeking"] = False
-                        handled_revision = revision
-                        _seek_target = target
-                    except PermissionError:
-                        try:
-                            os.remove(temporary)
-                        except FileNotFoundError:
-                            pass
-                elif os.path.exists(temporary):
-                    try:
-                        os.remove(temporary)
-                    except FileNotFoundError:
-                        pass
+            published = _publish_snapshot(
+                generation, revision, target, temporary, out_path
+            )
+            if published:
+                handled_revision = revision
             if cancelled():
                 continue
             next_write += interval_s

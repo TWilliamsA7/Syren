@@ -237,6 +237,20 @@ const formatNumber = (
   unit: string,
 ) => (typeof value === "number" ? `${value.toLocaleString()} ${unit}` : "—");
 
+// The history archive's first day (FIRST_DAY in data/history.py)
+const FIRST_HISTORY_DAY = "2023-02-16";
+
+// The newest day that can be replayed: today minus one, as YYYY-MM-DD in local time
+const latestHistoryDay = () => {
+  const day = new Date();
+  day.setDate(day.getDate() - 1);
+  return [
+    day.getFullYear(),
+    String(day.getMonth() + 1).padStart(2, "0"),
+    String(day.getDate()).padStart(2, "0"),
+  ].join("-");
+};
+
 const formatBehaviorValue = (signal: PredictionSignal, value: number) =>
   signal.type === "SPEED_LOSS"
     ? `${(value * 60).toFixed(1)} kt/min`
@@ -485,6 +499,12 @@ function App() {
 
     if (!searchDate) {
       setSearchError("A date is required to query the archive.");
+      return;
+    }
+    if (searchDate < FIRST_HISTORY_DAY || searchDate > latestHistoryDay()) {
+      setSearchError(
+        `Pick a day from ${FIRST_HISTORY_DAY} to ${latestHistoryDay()}.`,
+      );
       return;
     }
 
@@ -1008,6 +1028,8 @@ function App() {
                   <span>Date</span>
                   <input
                     type="date"
+                    min={FIRST_HISTORY_DAY}
+                    max={latestHistoryDay()}
                     value={searchDate}
                     onChange={(e) => setSearchDate(e.target.value)}
                   />
