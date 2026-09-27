@@ -69,18 +69,24 @@ def test_setup_fixed_days():
     with tempfile.TemporaryDirectory() as root:
         fake = lambda date: fake_release(root)
         setup_fixed_days(["2026-09-22", "2026-09-23"], root, find=fake)
-        assert days_on_disk(root) == {"fixed": ["2026-09-22", "2026-09-23"], "swap": None}
+        assert days_on_disk(root) == {
+            "fixed": ["2026-09-22", "2026-09-23"], "cache": [], "swap": None
+        }
         setup_fixed_days(["2026-09-23"], root, find=no_download)
-        assert days_on_disk(root) == {"fixed": ["2026-09-23"], "swap": None}
+        assert days_on_disk(root) == {"fixed": ["2026-09-23"], "cache": [], "swap": None}
 
 
-def test_swap_replaces_only_the_swap_day():
+def test_cache_keeps_multiple_downloaded_days():
     with tempfile.TemporaryDirectory() as root:
         fake = lambda date: fake_release(root)
         setup_fixed_days(["2026-09-24"], root, find=fake)
         swap_day("2026-09-20", root, find=fake)
         swap_day("2026-09-21", root, find=fake)
-        assert days_on_disk(root) == {"fixed": ["2026-09-24"], "swap": "2026-09-21"}
+        assert days_on_disk(root) == {
+            "fixed": ["2026-09-24"],
+            "cache": ["2026-09-20", "2026-09-21"],
+            "swap": "2026-09-21",
+        }
 
 
 def test_swap_to_a_day_on_disk_downloads_nothing():
@@ -90,7 +96,9 @@ def test_swap_to_a_day_on_disk_downloads_nothing():
         swap_day("2026-09-20", root, find=fake)
         swap_day("2026-09-24", root, find=no_download)
         swap_day("2026-09-20", root, find=no_download)
-        assert days_on_disk(root) == {"fixed": ["2026-09-24"], "swap": "2026-09-20"}
+        assert days_on_disk(root) == {
+            "fixed": ["2026-09-24"], "cache": ["2026-09-20"], "swap": "2026-09-20"
+        }
 
 
 def test_unreleased_date_keeps_old_swap_day():
@@ -104,6 +112,40 @@ def test_unreleased_date_keeps_old_swap_day():
         except LookupError:
             pass
         assert days_on_disk(root)["swap"] == "2026-09-20"
+
+
+def test_legacy_swap_is_migrated_to_cache():
+    with tempfile.TemporaryDirectory() as root:
+        old_day = pathlib.Path(root, "swap", "2026-09-20", "traces")
+        old_day.mkdir(parents=True)
+        (old_day / "trace.json").write_text("legacy")
+        days = days_on_disk(root)
+        assert days["cache"] == ["2026-09-20"]
+        assert days["swap"] == "2026-09-20"
+        assert not pathlib.Path(root, "swap").exists()
+        assert pathlib.Path(root, "cache", "2026-09-20", "traces", "trace.json").exists()
+
+
+def test_cache_evicts_least_recently_used_day():
+    from data import history
+
+    with tempfile.TemporaryDirectory() as root:
+        old_limit = history.MAX_CACHED_DAYS
+        history.MAX_CACHED_DAYS = 2
+        try:
+            fake = lambda date: fake_release(root)
+            swap_day("2026-09-20", root, find=fake)
+            time.sleep(0.02)
+            swap_day("2026-09-21", root, find=fake)
+            old_export = pathlib.Path(root, "cache", "2026-09-21", "exports")
+            old_export.mkdir()
+            (old_export / "2026-09-21_1600_1h.jsonl.gz").write_text("export")
+            swap_day("2026-09-20", root, find=no_download)  # a hit refreshes its LRU time
+            swap_day("2026-09-22", root, find=fake)
+            assert days_on_disk(root)["cache"] == ["2026-09-20", "2026-09-22"]
+            assert not pathlib.Path(root, "cache", "2026-09-21").exists()
+        finally:
+            history.MAX_CACHED_DAYS = old_limit
 
 
 def test_available_range():
@@ -168,9 +210,11 @@ def check_live_releases():
 if __name__ == "__main__":
     test_only_traces_are_kept()
     test_setup_fixed_days()
-    test_swap_replaces_only_the_swap_day()
+    test_cache_keeps_multiple_downloaded_days()
     test_swap_to_a_day_on_disk_downloads_nothing()
     test_unreleased_date_keeps_old_swap_day()
+    test_legacy_swap_is_migrated_to_cache()
+    test_cache_evicts_least_recently_used_day()
     test_available_range()
     test_dates_outside_the_archive_are_rejected()
     test_start_swap_in_background()

@@ -88,8 +88,10 @@ Replay reads days from `data/archive/` (not committed). Download the days listed
 .venv/bin/python -m data.history list
 ```
 
-Any other day from 2023-02-16 to yesterday can be picked in the app. It is downloaded then
-(about 10 minutes) and replaces the previous non-fixed day.
+Any other day from 2023-02-16 to yesterday can be picked in the app. A missing day is downloaded
+then (about 10 minutes); the newest seven downloaded days are kept in a rotating cache alongside
+the fixed days. Set `SYREN_ARCHIVE_DIR` to store the archive outside the repository, such as on a
+persistent DigitalOcean Volume.
 
 ## Run
 

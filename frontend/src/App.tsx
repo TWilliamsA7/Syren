@@ -465,6 +465,9 @@ function App() {
       });
       if (response.ok) {
         setHistoryMode(true);
+      } else {
+        const payload = await response.json().catch(() => null);
+        setSearchError(payload?.error ?? "Replay could not be started. Try again shortly.");
       }
     } catch (e) {
       console.error("Error calling start_history", e);

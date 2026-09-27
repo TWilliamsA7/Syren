@@ -6,11 +6,6 @@ server {
     root /opt/syren/frontend/dist;
     index index.html;
 
-    location ~ ^/api/(start_history|stop_history|skip|history_status|history_aircraft|history_days)$ {
-        default_type application/json;
-        return 404 '{"error":"Historical replay is disabled on this demo."}';
-    }
-
     location = /api/ask_aircraft {
         limit_req zone=syren_gemini burst=2 nodelay;
         limit_req_status 429;

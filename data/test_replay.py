@@ -110,14 +110,36 @@ def test_bad_date_fails():
         out_path = os.path.join(root, "history.jsonl")
         with open(out_path, "w") as f:
             f.write("planes from the last date\n")
-        start_history("2010-01-01", out_path=out_path, root=root)
-        assert "not a day in the history archive" in wait_for("failed")["error"]
+        try:
+            start_history("2010-01-01", out_path=out_path, root=root)
+            assert False, "invalid dates should fail before a replay starts"
+        except ValueError as error:
+            assert "not a day in the history archive" in str(error)
         with open(out_path) as f:
-            assert f.read() == "", "starting a date clears history.jsonl"
+            assert f.read() == "planes from the last date\n", "invalid dates must not alter replay output"
+
+
+def test_concurrent_public_cache_miss_is_rejected():
+    import data.replay as replay
+
+    with tempfile.TemporaryDirectory() as root:
+        with replay._lock:
+            was_downloading = replay._download_in_progress
+            replay._download_in_progress = True
+        try:
+            try:
+                start_history("2026-09-24", root=root)
+                assert False, "a second cache miss should be rejected while one download runs"
+            except RuntimeError as error:
+                assert "already in progress" in str(error)
+        finally:
+            with replay._lock:
+                replay._download_in_progress = was_downloading
 
 
 if __name__ == "__main__":
     test_player()
     test_start_skip_stop()
     test_bad_date_fails()
+    test_concurrent_public_cache_miss_is_rejected()
     print("all tests passed")

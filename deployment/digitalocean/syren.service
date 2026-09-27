@@ -2,6 +2,7 @@
 Description=Syren live aircraft API and feed
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/mnt/syren-history
 
 [Service]
 Type=simple
@@ -9,6 +10,7 @@ User=syren
 Group=syren
 WorkingDirectory=/opt/syren
 Environment=SYREN_HOST=127.0.0.1
+Environment=SYREN_ARCHIVE_DIR=/mnt/syren-history
 Environment=PORT=8000
 EnvironmentFile=-/etc/syren/syren.env
 ExecStart=/opt/syren/.venv/bin/python -m backend.server

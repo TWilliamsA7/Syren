@@ -1,16 +1,21 @@
 # DigitalOcean Droplet deployment
 
-This guide deploys the live demo on one Ubuntu Droplet. Nginx serves the built React app and
-proxies `/api` to the Python server. A systemd service keeps the API and its child live-feed
-process running. Replay is hidden in the public build and its API endpoints are blocked, so the
-server does not download multi-gigabyte history archives.
+This guide deploys Syren on one Ubuntu Droplet. Nginx serves the built React app and proxies
+`/api` to the Python server. A systemd service keeps the API and its child live-feed process
+running. A 50 GiB Block Storage Volume holds the pinned history days plus a seven-day rotating
+replay cache.
 
 ## 1. Create the Droplet
 
 In the DigitalOcean control panel, create an Ubuntu 24.04 Droplet. A 2 GiB shared CPU size is a
-reasonable starting point for the live demo. Add an SSH key, enable monitoring, and create a
-Cloud Firewall allowing inbound TCP 22 (SSH), 80 (HTTP), and 443 (HTTPS); allow outbound traffic
-so the server can reach GitHub, adsb.lol, and Google Gemini. Attach the firewall to the Droplet.
+reasonable starting point. Add an SSH key, enable monitoring, and create a Cloud Firewall
+allowing inbound TCP 22 (SSH), 80 (HTTP), and 443 (HTTPS); allow outbound traffic so the server
+can reach GitHub, adsb.lol, and Google Gemini. Attach the firewall to the Droplet.
+
+Create a 50 GiB Block Storage Volume in the same region, attach it to the Droplet, and format it
+as ext4 mounted at `/mnt/syren-history`. Choose DigitalOcean's automatic format-and-mount option
+for a new volume. The included systemd unit waits for this mount before starting Syren. Never
+format a volume that already contains archive data.
 
 DigitalOcean recommends SSH-key access and a non-root sudo user. Use its
 [recommended Droplet setup](https://docs.digitalocean.com/products/droplets/getting-started/recommended-droplet-setup/)
@@ -52,17 +57,34 @@ optional; if you want it, install its client in the app environment:
 sudo -u syren /opt/syren/.venv/bin/python -m pip install google-genai
 ```
 
+If this Droplet replaces one that already has `data/archive/`, copy that directory to the Volume
+before starting Syren. Skip this when there is no existing archive:
+
+```sh
+rsync -a /opt/syren/data/archive/ /mnt/syren-history/
+chown -R syren:syren /mnt/syren-history
+```
+
+To prepopulate the two pinned dates configured in `data/history.py` (about 3 GiB of disk per
+day and roughly 10 minutes per date), run:
+
+```sh
+sudo -u syren env SYREN_ARCHIVE_DIR=/mnt/syren-history /opt/syren/.venv/bin/python -m data.history setup
+```
+
 ## 3. Build the frontend
 
 Install Node.js 22 (which satisfies the repo's Node 22.12+ requirement) using the current
 [Node.js installation instructions](https://nodejs.org/en/download/package-manager), then run:
 
 ```sh
-sudo -u syren -H sh -lc 'cd /opt/syren/frontend && npm ci && VITE_ENABLE_REPLAY=false npm run build'
+sudo -u syren -H sh -lc 'cd /opt/syren/frontend && npm ci && VITE_ENABLE_REPLAY=true npm run build'
 ```
 
-The demo build omits replay controls. The web server config also blocks replay API routes as a
-second guard.
+The UI lets visitors request any valid archive date. A cache miss streams that day's archive to
+the Volume; only one date downloads at a time. The cache retains seven completed downloaded days
+in addition to pinned days. When it is full, the least recently used downloaded day and its replay
+export are removed.
 
 ## 4. Configure Gemini (optional)
 
@@ -106,11 +128,8 @@ curl -i http://127.0.0.1:8000/api/aircraft
 ```
 
 From your computer, open the site and confirm the map updates. The API returns `200` (or `304`
-when the feed has not changed). Confirm a replay request returns `404`:
-
-```powershell
-Invoke-WebRequest -Method Post -Uri http://DROPLET_IP/api/start_history -ContentType 'application/json' -Body '{"date":"2026-09-25"}'
-```
+when the feed has not changed). Confirm that the replay panel is visible and choose a cached date
+to confirm playback starts without another archive download.
 
 For logs use `journalctl -u syren -f`. To deploy a later revision, run `git pull` as the `syren`
 account, rebuild the frontend, then run `systemctl restart syren` (restart Nginx only if its

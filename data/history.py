@@ -1,15 +1,8 @@
-"""adsb.lol history days on disk (github.com/adsblol/globe_history_YYYY).
+"""Persistent, bounded cache for adsb.lol historical replay days.
 
-Two kinds of day:
-- FIXED_DAYS are hardcoded and always on disk (run `setup` once per machine).
-- One "swap" day, picked from the frontend; picking another day replaces it.
-
-Only the trace files are kept:
-data/archive/{fixed,swap}/YYYY-MM-DD/traces/<last 2 hex>/trace_full_<icao24>.json
-
-python3 -m data.history setup              # download FIXED_DAYS, remove fixed days no longer listed
-python3 -m data.history swap 2026-09-20    # replace the swap day
-python3 -m data.history list
+Pinned days live in ``fixed``; up to MAX_CACHED_DAYS downloaded days live in
+``cache`` and rotate by least-recently-used order. The archive root defaults to
+``data/archive`` and can be moved with SYREN_ARCHIVE_DIR.
 """
 
 import argparse
@@ -23,8 +16,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ARCHIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "archive")
+ARCHIVE_DIR = os.environ.get(
+    "SYREN_ARCHIVE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "archive"),
+)
 FIXED_DAYS = ["2024-07-20", "2026-09-25"]
+MAX_CACHED_DAYS = 7
+MIN_DOWNLOAD_FREE_BYTES = 5 * 1024**3
+MIN_FREE_RESERVE_BYTES = 512 * 1024**2
 FIRST_DAY = "2023-02-16" 
 REPO_YEARS = range(2023, 2027) 
 RELEASE_API = "https://api.github.com/repos/adsblol/globe_history_{year}/releases/tags/{tag}"
@@ -34,6 +33,8 @@ REPORT_EVERY_BYTES = 100_000_000
 
 _swap_lock = threading.Lock()
 _swap_status = {"state": "idle", "date": None, "done_bytes": 0, "total_bytes": 0, "error": None}
+_migration_lock = threading.Lock()
+_migrated_roots = set()
 
 
 # Describe where urllib will send a request without exposing proxy credentials.
@@ -75,8 +76,26 @@ def available_range():
 # Raise ValueError unless date is a real "YYYY-MM-DD" day inside available_range().
 def _check_date(date):
     first, last = available_range()
+    if not isinstance(date, str):
+        raise ValueError("history date must be a YYYY-MM-DD string")
     if datetime.date.fromisoformat(date).isoformat() != date or not first <= date <= last:
         raise ValueError(f"{date!r} is not a day in the history archive ({first} to {last})")
+
+
+def _day_directories(folder):
+    if not os.path.isdir(folder):
+        return []
+    result = []
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        if not os.path.isdir(path):
+            continue
+        try:
+            if datetime.date.fromisoformat(name).isoformat() == name:
+                result.append(name)
+        except ValueError:
+            continue
+    return result
 
 
 # Look up one day's release on GitHub and return [(url, size), ...] of its tar parts, in order.
@@ -162,32 +181,114 @@ class _Downloads:
 # Stream a day's tar parts, keep only the trace_full_* files, and move them to final.
 # Works in root/.partial so an interrupted download never looks like a finished day.
 def _download(date, parts, final, root, on_progress=None):
-    partial = os.path.join(root, ".partial")
+    os.makedirs(root, exist_ok=True)
+    free = shutil.disk_usage(root).free
+    if free < MIN_DOWNLOAD_FREE_BYTES:
+        raise OSError(
+            f"history volume has only {free / 1024**3:.1f} GiB free; "
+            f"at least {MIN_DOWNLOAD_FREE_BYTES / 1024**3:.0f} GiB is required to start a day download"
+        )
+
+    partial = os.path.join(root, ".partial", date)
     shutil.rmtree(partial, ignore_errors=True)  # left over from an interrupted download
     print(f"{date}: {sum(size for _, size in parts) / 1e9:.1f} GB in {len(parts)} part(s)")
 
     count = 0
-    with tarfile.open(fileobj=_Downloads(parts, on_progress, date=date), mode="r|") as tar:
-        for member in tar:
-            name = os.path.basename(member.name)
-            if not (member.isfile() and name.startswith("trace_full_")):
-                continue
-            icao24 = name[len("trace_full_"):-len(".json")]
-            folder = os.path.join(partial, "traces", icao24[-2:])
-            os.makedirs(folder, exist_ok=True)
-            with open(os.path.join(folder, name), "wb") as out:
-                shutil.copyfileobj(tar.extractfile(member), out)
-            count += 1
+    extracted_bytes = 0
+    next_space_check = 0
+    os.makedirs(partial, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=_Downloads(parts, on_progress, date=date), mode="r|") as tar:
+            for member in tar:
+                name = os.path.basename(member.name)
+                if not (member.isfile() and name.startswith("trace_full_")):
+                    continue
+                if extracted_bytes >= next_space_check:
+                    free = shutil.disk_usage(root).free
+                    if free < member.size + MIN_FREE_RESERVE_BYTES:
+                        raise OSError(
+                            f"not enough free space to safely extract {date}; "
+                            f"{free / 1024**3:.1f} GiB remains"
+                        )
+                    next_space_check = extracted_bytes + 256 * 1024**2
+                icao24 = name[len("trace_full_"):-len(".json")]
+                folder = os.path.join(partial, "traces", icao24[-2:])
+                os.makedirs(folder, exist_ok=True)
+                with open(os.path.join(folder, name), "wb") as out:
+                    shutil.copyfileobj(tar.extractfile(member), out)
+                extracted_bytes += member.size
+                count += 1
 
-    os.makedirs(os.path.dirname(final), exist_ok=True)
-    os.rename(partial, final)
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        os.rename(partial, final)
+    finally:
+        if os.path.isdir(partial):
+            shutil.rmtree(partial, ignore_errors=True)
     print(f"\n{count} aircraft traces -> {final}")
     return final
 
 
-# The folder holding a day's traces (fixed or swap), or None if that day isn't on disk.
+# Move the old single-day swap directory into the multi-day cache once per root.
+def _migrate_legacy_swap(root):
+    normalized_root = os.path.abspath(root)
+    if normalized_root in _migrated_roots:
+        return
+    with _migration_lock:
+        if normalized_root in _migrated_roots:
+            return
+        legacy = os.path.join(root, "swap")
+        if os.path.isdir(legacy):
+            cache = os.path.join(root, "cache")
+            os.makedirs(cache, exist_ok=True)
+            for date in os.listdir(legacy):
+                source = os.path.join(legacy, date)
+                if not os.path.isdir(source):
+                    continue
+                pinned = os.path.join(root, "fixed", date)
+                target = os.path.join(cache, date)
+                if os.path.isdir(pinned) or os.path.exists(target):
+                    shutil.rmtree(source)
+                else:
+                    os.replace(source, target)
+            try:
+                os.rmdir(legacy)
+            except OSError:
+                pass
+        # Older builds kept all replay exports directly under the archive root.
+        legacy_exports = os.path.join(root, "exports")
+        if os.path.isdir(legacy_exports):
+            for name in os.listdir(legacy_exports):
+                date = name[:10]
+                if len(name) < 12 or name[10] != "_":
+                    continue
+                day = next((
+                    os.path.join(root, kind, date)
+                    for kind in ("fixed", "cache", "swap")
+                    if os.path.isdir(os.path.join(root, kind, date))
+                ), None)
+                if day is None:
+                    continue
+                target_dir = os.path.join(day, "exports")
+                os.makedirs(target_dir, exist_ok=True)
+                target = os.path.join(target_dir, name)
+                source = os.path.join(legacy_exports, name)
+                if os.path.exists(target):
+                    os.remove(source)
+                else:
+                    os.replace(source, target)
+            try:
+                os.rmdir(legacy_exports)
+            except OSError:
+                pass
+        # A partial download is never a usable replay day; discard leftovers from older runs.
+        shutil.rmtree(os.path.join(root, ".partial"), ignore_errors=True)
+        _migrated_roots.add(normalized_root)
+
+
+# The folder holding a day's traces (fixed or cached), or None if it isn't on disk.
 def day_dir(date, root=ARCHIVE_DIR):
-    for kind in ("fixed", "swap"):
+    _migrate_legacy_swap(root)
+    for kind in ("fixed", "cache", "swap"):
         path = os.path.join(root, kind, date)
         if os.path.isdir(path):
             return path
@@ -204,39 +305,90 @@ def trace_path(date, icao24, root=ARCHIVE_DIR):
     return path if os.path.exists(path) else None
 
 
-# The days on disk, i.e. the days you can replay:
-# {"fixed": ["2026-09-24", ...], "swap": "2026-09-20" or None}
+# The days on disk. ``swap`` remains as an alias for the most recently used
+# cached day for compatibility with the previous one-swap API.
 def days_on_disk(root=ARCHIVE_DIR):
+    _migrate_legacy_swap(root)
     fixed_folder = os.path.join(root, "fixed")
-    swap_folder = os.path.join(root, "swap")
-    fixed = sorted(os.listdir(fixed_folder)) if os.path.isdir(fixed_folder) else []
-    swap = sorted(os.listdir(swap_folder)) if os.path.isdir(swap_folder) else []
-    return {"fixed": fixed, "swap": swap[0] if swap else None}
+    cache_folder = os.path.join(root, "cache")
+    fixed = sorted(_day_directories(fixed_folder))
+    cached = sorted(
+        _day_directories(cache_folder)
+    )
+    most_recent = max(
+        cached,
+        key=lambda date: os.path.getmtime(os.path.join(cache_folder, date)),
+        default=None,
+    )
+    return {"fixed": fixed, "cache": cached, "swap": most_recent}
+
+
+def touch_cached_day(date, root=ARCHIVE_DIR):
+    """Mark a cached day recently used; pinned days are deliberately unchanged."""
+    path = os.path.join(root, "cache", date)
+    if os.path.isdir(path):
+        os.utime(path, None)
+        return True
+    return False
+
+
+def trim_cache(root=ARCHIVE_DIR, protected=()):
+    """Keep only the newest cache days, excluding a day being replayed."""
+    _migrate_legacy_swap(root)
+    cache_folder = os.path.join(root, "cache")
+    if not os.path.isdir(cache_folder):
+        return []
+    protected = set(protected)
+    entries = _day_directories(cache_folder)
+    entries.sort(key=lambda date: (os.path.getmtime(os.path.join(cache_folder, date)), date))
+    removed = []
+    while len(entries) > MAX_CACHED_DAYS:
+        victim = next((date for date in entries if date not in protected), None)
+        if victim is None:
+            break
+        shutil.rmtree(os.path.join(cache_folder, victim))
+        entries.remove(victim)
+        removed.append(victim)
+        print(f"evicted least-recently-used history day {victim}")
+    return removed
 
 
 # Make the fixed days on disk match days: download the missing ones and delete
 # the ones no longer listed. Run once per machine with `python3 -m data.history setup`.
 def setup_fixed_days(days=FIXED_DAYS, root=ARCHIVE_DIR, find=find_release):
+    _migrate_legacy_swap(root)
     for date in days_on_disk(root)["fixed"]:
         if date not in days:
             shutil.rmtree(os.path.join(root, "fixed", date))
             print(f"removed {date}, no longer a fixed day")
     for date in days:
-        if day_dir(date, root) is None:
-            _download(date, find(date), os.path.join(root, "fixed", date), root)
+        fixed = os.path.join(root, "fixed", date)
+        if os.path.isdir(fixed):
+            continue
+        cached = os.path.join(root, "cache", date)
+        if os.path.isdir(cached):
+            os.makedirs(os.path.dirname(fixed), exist_ok=True)
+            os.replace(cached, fixed)
+        else:
+            _download(date, find(date), fixed, root)
+    trim_cache(root)
 
 
-# The swap itself, shared by swap_day and start_swap (the caller holds the lock).
-# Does nothing if the day is already on disk; otherwise finds the release first,
-# then deletes the old swap day and downloads the new one.
-def _swap(date, root, find, on_progress):
+# Download one day into the rotating cache. A failed download leaves cached days intact.
+def _swap(date, root, find, on_progress, trim=True):
+    _migrate_legacy_swap(root)
     _check_date(date)  # raises ValueError for a malformed date
     existing = day_dir(date, root)
     if existing is not None:
-        return existing  # a fixed day, or already the swap day
-    parts = find(date)  # before deleting anything, so an unknown date keeps the old swap day
-    shutil.rmtree(os.path.join(root, "swap"), ignore_errors=True)
-    return _download(date, parts, os.path.join(root, "swap", date), root, on_progress)
+        touch_cached_day(date, root)
+        return existing
+    parts = find(date)
+    final = os.path.join(root, "cache", date)
+    downloaded = _download(date, parts, final, root, on_progress)
+    touch_cached_day(date, root)
+    if trim:
+        trim_cache(root, protected={date})
+    return downloaded
 
 
 # Make date available, replacing the previous swap day. Blocks until done (~10 min).
@@ -285,17 +437,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manage adsb.lol history days on disk.")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("setup", help="download FIXED_DAYS and remove fixed days no longer listed")
-    swap_command = commands.add_parser("swap", help="replace the swap day with another day")
-    swap_command.add_argument("date", help="YYYY-MM-DD")
+    cache_command = commands.add_parser("cache", aliases=["swap"], help="download or reuse a history day")
+    cache_command.add_argument("date", help="YYYY-MM-DD")
     commands.add_parser("list", help="show the days on disk")
     args = parser.parse_args()
 
     if args.command == "setup":
         setup_fixed_days()
-    elif args.command == "swap":
+    elif args.command in ("cache", "swap"):
         swap_day(args.date)
     elif args.command == "list":
         days = days_on_disk()
         print(f"archive  {' to '.join(available_range())}")
         print(f"fixed  {', '.join(days['fixed']) or '-'}")
-        print(f"swap   {days['swap'] or '-'}")
+        print(f"cache  {', '.join(days['cache']) or '-'}")

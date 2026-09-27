@@ -6,10 +6,18 @@ import datetime
 import json
 import os
 import re
+import shutil
 import threading
 import time
 
-from data.history import ARCHIVE_DIR, day_dir, swap_day
+from data.history import (
+    ARCHIVE_DIR,
+    _check_date,
+    day_dir,
+    swap_day,
+    touch_cached_day,
+    trim_cache,
+)
 from data.trace import export_day, open_jsonl
 from detection.engine import build_default_engine
 from ml.aircraft_warning import AircraftWarningEngine
@@ -31,6 +39,8 @@ _snapshot_payload = b"[]"
 _status = {"state": "idle", "date": None, "clock": None, "first": None, "last": None,
            "done_bytes": 0, "total_bytes": 0, "export_done": 0, "export_total": 0,
            "error": None, "seeking": False}
+_download_in_progress = False
+_download_owner_generation = None
 
 
 # (timestamp, icao24) of one FlightState JSON line.
@@ -259,28 +269,58 @@ def _set(generation, **fields):
         return True
 
 
+def _keep_one_day_export(day_path, date, keep_path):
+    """Retain only the latest requested replay export for a day."""
+    export_dir = os.path.join(day_path, "exports")
+    keep_name = os.path.basename(keep_path)
+    if not os.path.isdir(export_dir):
+        return
+    for name in os.listdir(export_dir):
+        if not name.startswith(date + "_"):
+            continue
+        if name == keep_name or name.startswith(keep_name + "."):
+            continue
+        path = os.path.join(export_dir, name)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+        except OSError:
+            pass
+
+
 # The background thread: download the day if needed, export it once, then write a
 # snapshot every interval_s until stopped, moving the clock speed * interval_s each time.
 # At the end of the file it keeps showing the last moment, so skip(-300) still works.
 def _run(generation, date, start, hours, speed, interval_s, out_path, root):
     global _player, _seek_target
     try:
-        if day_dir(date, root) is None:
+        archive_day = day_dir(date, root)
+        if archive_day is None:
             _set(generation, state="downloading")
             swap_day(date, root, on_progress=lambda done, total: _set(
-                generation, done_bytes=done, total_bytes=total))
-        export = os.path.join(root, "exports", f"{date}_{start.replace(':', '')}_{hours:g}h.jsonl.gz")
+                generation, done_bytes=done, total_bytes=total), trim=False)
+            archive_day = day_dir(date, root)
+        else:
+            touch_cached_day(date, root)
+        export_dir = os.path.join(archive_day, "exports")
+        export = os.path.join(export_dir, f"{date}_{start.replace(':', '')}_{hours:g}h.jsonl.gz")
         if not os.path.exists(export):
             if not _set(generation, state="exporting", export_done=0, export_total=1):
                 return
             with _export_lock:
                 if not os.path.exists(export):  # another start may have just made it
+                    os.makedirs(export_dir, exist_ok=True)
                     def on_export_progress(done, total):
                         _set(generation, export_done=done, export_total=total)
                     export_day(date, export, start, hours, root=root, on_progress=on_export_progress)
         
         _set(generation, state="loading_player")
         player = Player(export)
+        _keep_one_day_export(archive_day, date, export)
+        touch_cached_day(date, root)
+        trim_cache(root, protected={date})
         with _lock:
             if generation != _generation:
                 return
@@ -324,6 +364,12 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
             time.sleep(max(0.0, next_write - time.monotonic()))
     except Exception as error:
         _set(generation, state="failed", error=str(error), seeking=False)
+    finally:
+        global _download_in_progress, _download_owner_generation
+        with _lock:
+            if _download_owner_generation == generation:
+                _download_in_progress = False
+                _download_owner_generation = None
 
 
 # Enter a date: show that day from start ("HH:MM" UTC) for hours in history.jsonl.
@@ -332,19 +378,34 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
 def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
                   out_path=HISTORY_FILE, root=ARCHIVE_DIR):
     global _generation, _player, _seek_revision, _seek_target, _snapshot_payload
+    global _download_in_progress, _download_owner_generation
+    _check_date(date)
+    needs_download = day_dir(date, root) is None
     with _lock:
+        if _download_in_progress:
+            raise RuntimeError("a history download is already in progress; try again shortly")
         _generation += 1
         _seek_revision = 0
         _seek_target = None
         _snapshot_payload = b"[]"
         _player = None
-        _status.update(state="loading", date=date, clock=None, first=None, last=None,
+        _download_in_progress = needs_download
+        _download_owner_generation = _generation if needs_download else None
+        _status.update(state="downloading" if needs_download else "loading",
+                       date=date, clock=None, first=None, last=None,
                        done_bytes=0, total_bytes=0, export_done=0, export_total=1,
                        error=None, seeking=False)
         generation = _generation
         write_snapshot([], out_path)
-    threading.Thread(target=_run, daemon=True,
-                     args=(generation, date, start, hours, speed, interval_s, out_path, root)).start()
+    try:
+        threading.Thread(target=_run, daemon=True,
+                         args=(generation, date, start, hours, speed, interval_s, out_path, root)).start()
+    except Exception:
+        with _lock:
+            if _download_owner_generation == generation:
+                _download_in_progress = False
+                _download_owner_generation = None
+        raise
 
 
 # Exit date mode: stop writing history.jsonl (the file stays). A download that already
