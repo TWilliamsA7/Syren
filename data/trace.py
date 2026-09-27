@@ -121,7 +121,7 @@ def _lines_in_area(path, start_s, end_s, lat, lon, radius_nm):
 # Reads all ~80k trace files of the day, spread over every CPU core, calling
 # on_progress(files_done, files_total) along the way if given.
 def export_day(date, out_path, start="16:00", hours=1.0, lat=CENTER[0], lon=CENTER[1],
-               radius_nm=RADIUS_NM, root=ARCHIVE_DIR, on_progress=None, on_progress=None):
+               radius_nm=RADIUS_NM, root=ARCHIVE_DIR, on_progress=None):
     folder = day_dir(date, root)
     if folder is None:
         raise LookupError(f"{date} is not on disk, get it with: python3 -m data.history swap {date}")
