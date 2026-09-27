@@ -68,10 +68,10 @@ def train(dataset: Path, comparison_dir: Path, output_dir: Path) -> dict:
         "training_dates": sorted({row["date_utc"] for row in rows}),
         "training_aircraft_days": len({(row["date_utc"], row["icao24"]) for row in rows}),
         "positive_aircraft_days": len({(row["date_utc"], row["icao24"]) for row in rows if row["label"]}),
-        "python_requirement": "CPython 3.13.3", "sklearn_version": sklearn.__version__,
+        "python_requirement": "CPython 3.10.0", "sklearn_version": sklearn.__version__,
         "model_file": str((output_dir / "selected_research_model.joblib").resolve()),
         "portable_json_file": str(portable.resolve()) if portable else None,
-        "warning": "Best configuration and threshold were chosen on the same three development days. Research replay only; no untouched evaluation or Orin benchmark.",
+        "warning": "Best configuration and threshold were chosen on the same three development days. Research replay only; no untouched evaluation.",
     }
     (output_dir / "selected_research_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     return metadata
