@@ -111,7 +111,9 @@ Open http://localhost:5173. Vite forwards `/api` requests to port 8000. Stop bot
 ### Using the app
 
 - **Live:** planes are green; orange when a detector flags them (listed under
-  "Detected anomalies"); red when squawking an emergency (listed under "Airspace").
+  "Detected anomalies"); yellow when the experimental prediction model expects trouble
+  (listed under "Experimental behavior warnings"); red when squawking an emergency (listed
+  under "Airspace").
 - **Find aircraft:** enter a callsign, ICAO hex or registration to zoom to it and follow it.
 - **Click a plane** to pin its details, then "Ask Gemini about this aircraft" for a summary.
 - **Replay a day:** pick a date and a 24-hour UTC start time, then "Load replay". The first

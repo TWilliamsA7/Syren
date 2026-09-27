@@ -35,3 +35,4 @@ frontend/public/*.tmp
 
 
 tmp/
+data/evaluation/
