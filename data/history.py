@@ -20,6 +20,7 @@ import shutil
 import tarfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ARCHIVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "archive")
@@ -35,11 +36,33 @@ _swap_lock = threading.Lock()
 _swap_status = {"state": "idle", "date": None, "done_bytes": 0, "total_bytes": 0, "error": None}
 
 
+# Describe where urllib will send a request without exposing proxy credentials.
+def _request_context(url):
+    parsed = urllib.parse.urlsplit(url)
+    proxy = urllib.request.getproxies().get(parsed.scheme)
+    if proxy:
+        proxy_url = urllib.parse.urlsplit(proxy if "://" in proxy else "//" + proxy)
+        route = f"proxy={proxy_url.hostname or 'configured'}"
+    else:
+        route = "proxy=none"
+    return f"host={parsed.hostname or 'unknown'} {route}"
+
+
 # GET a URL (the GitHub API) and return the parsed JSON body.
 def _get_json(url):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError:
+        raise
+    except Exception as error:
+        raise RuntimeError(
+            f"history release lookup failed "
+            f"(at={datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}, "
+            f"{_request_context(url)}): "
+            f"{type(error).__name__}: {error}"
+        ) from error
 
 
 # (first, last) day in the archive as "YYYY-MM-DD", e.g. for a date picker's limits.
@@ -84,9 +107,12 @@ def find_release(date):
 class _Downloads:
 
     # Remember the part URLs and total size; nothing downloads until read() is called.
-    def __init__(self, parts, on_progress=None):
+    def __init__(self, parts, on_progress=None, date=None):
         self._urls = [url for url, _ in parts]
         self._response = None
+        self._active_url = None
+        self._active_part = 0
+        self._date = date
         self._on_progress = on_progress
         self.total = sum(size for _, size in parts)
         self.done = 0
@@ -99,9 +125,28 @@ class _Downloads:
             if self._response is None:
                 if not self._urls:
                     return b""
-                request = urllib.request.Request(self._urls.pop(0), headers={"User-Agent": USER_AGENT})
-                self._response = urllib.request.urlopen(request, timeout=60)
-            chunk = self._response.read(size)
+                self._active_url = self._urls.pop(0)
+                self._active_part += 1
+                request = urllib.request.Request(self._active_url, headers={"User-Agent": USER_AGENT})
+                try:
+                    self._response = urllib.request.urlopen(request, timeout=60)
+                except Exception as error:
+                    raise RuntimeError(
+                        f"history asset open failed "
+                        f"(at={datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}, "
+                        f"date={self._date}, "
+                        f"part={self._active_part}, {_request_context(self._active_url)}): "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+            try:
+                chunk = self._response.read(size)
+            except Exception as error:
+                raise RuntimeError(
+                    f"history asset read failed "
+                    f"(at={datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}, "
+                    f"date={self._date}, part={self._active_part}, "
+                    f"{_request_context(self._active_url)}): {type(error).__name__}: {error}"
+                ) from error
             if chunk:
                 self.done += len(chunk)
                 if self._on_progress is not None:
@@ -122,7 +167,7 @@ def _download(date, parts, final, root, on_progress=None):
     print(f"{date}: {sum(size for _, size in parts) / 1e9:.1f} GB in {len(parts)} part(s)")
 
     count = 0
-    with tarfile.open(fileobj=_Downloads(parts, on_progress), mode="r|") as tar:
+    with tarfile.open(fileobj=_Downloads(parts, on_progress, date=date), mode="r|") as tar:
         for member in tar:
             name = os.path.basename(member.name)
             if not (member.isfile() and name.startswith("trace_full_")):
