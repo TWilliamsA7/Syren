@@ -99,18 +99,31 @@ class Player:
                                   copy.deepcopy(self._warning_engine),
                                   self._detection_results.copy(), self._prediction_results.copy()))
 
-    def _restore_checkpoint(self, target):
+    def _checkpoint_at_or_before(self, target):
         checkpoint = self._checkpoints[0]
         for candidate in self._checkpoints:
             if candidate[0] <= target and candidate[0] >= checkpoint[0]:
                 checkpoint = candidate
-        (self.clock, self._next_detection_index, self._detection_engine,
-         self._warning_engine, self._detection_results, self._prediction_results) = copy.deepcopy(checkpoint)
+        return checkpoint
+
+    def _restore_checkpoint(self, checkpoint):
+        (self.clock, self._next_detection_index, detection_engine, warning_engine,
+         detection_results, prediction_results) = checkpoint
+        self._detection_engine = copy.deepcopy(detection_engine)
+        self._warning_engine = copy.deepcopy(warning_engine)
+        # Checkpoint result values are immutable after insertion; only the
+        # per-ICAO dictionaries need to be independent when replay advances.
+        self._detection_results = detection_results.copy()
+        self._prediction_results = prediction_results.copy()
         self._next_checkpoint = self.clock + 60.0
 
-    def _advance_engines(self, target, cancelled=lambda: False, force_checkpoint=False):
-        if force_checkpoint or target < self.clock:
-            self._restore_checkpoint(target)
+    def _advance_engines(self, target, cancelled=lambda: False):
+        checkpoint = self._checkpoint_at_or_before(target)
+        # Rewind to a checkpoint for backward seeks. For forward seeks, use a
+        # checkpoint only when it is ahead of the current engine state, which
+        # occurs when seeking forward again after a rewind.
+        if target < self.clock or checkpoint[0] > self.clock:
+            self._restore_checkpoint(checkpoint)
         end = bisect.bisect_right(self.times, target)
         with open(self._plain_path, "rb") as feed:
             while self._next_detection_index < end:
@@ -136,14 +149,29 @@ class Player:
         self.clock = target
         return True
 
+    # A seek is a discontinuity: don't run every skipped state through the
+    # temporal engines. Start them fresh at the destination and process new
+    # states as playback continues from there.
+    def jump_to(self, target):
+        target = min(max(target, self.first), self.last)
+        self.clock = target
+        self._detection_engine = build_default_engine()
+        self._warning_engine = AircraftWarningEngine()
+        self._next_detection_index = bisect.bisect_right(self.times, target)
+        self._detection_results = {}
+        self._prediction_results = {}
+        self._checkpoints = []
+        self._next_checkpoint = target + 60.0
+        self._save_checkpoint(target, self._next_detection_index)
+
     # Move the clock by seconds (negative goes back), staying inside the file.
     def skip(self, seconds):
         self.clock = min(max(self.clock + seconds, self.first), self.last)
 
     # JSON lines of the latest state of each aircraft heard in the GONE_AFTER_S before the clock.
-    def snapshot(self, target=None, cancelled=lambda: False, force_checkpoint=False):
+    def snapshot(self, target=None, cancelled=lambda: False):
         target = self.clock if target is None else min(max(target, self.first), self.last)
-        if not self._advance_engines(target, cancelled, force_checkpoint):
+        if not self._advance_engines(target, cancelled):
             return None
         begin = bisect.bisect_left(self.times, target - GONE_AFTER_S)
         end = bisect.bisect_right(self.times, target)
@@ -276,7 +304,9 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
                 with _lock:
                     return generation != _generation or revision != _seek_revision
 
-            lines = player.snapshot(target, cancelled, force_checkpoint=seeking and handled_revision >= 0)
+            if seeking:
+                player.jump_to(target)
+            lines = player.snapshot(target, cancelled)
             if lines is None:
                 continue
             temporary = out_path + f".{generation}.{revision}.tmp"
