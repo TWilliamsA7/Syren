@@ -312,3 +312,18 @@ the sampled replay fleet, below the exploratory limit of 60. The same raw
 trace and result interface is used for each rule and their OR. This is a
 development replay, not a future-date or broad-fleet performance claim; the
 predictor is separate from the live detection engine.
+
+## Threshold sensitivity review
+
+On that same 2025-11-15 replay, raising the speed-loss cutoff to 0.16 kt/s
+and the altitude-reversal cutoff to 150 ft reduced combined control alerts
+from 546 to 467 (14%), while detected events fell from 17/27 to 13/27. A
+stricter 0.20 kt/s and 250 ft trial reduced control alerts to 402 (26%); it
+also detected 13/27 events. The stricter trial warned on 11 events in the
+target 2–10 minute band, compared with 9 at the current settings, while the
+combined median warning lead fell from about 528 to 380 seconds. Both trials
+remain exploratory: the thresholds were compared on one development date,
+and control alerts are not confirmed false emergencies. Keep the current
+warning defaults until a candidate is frozen and evaluated on a separate
+date; use 0.20 kt/s and 250 ft as a candidate for that next evaluation, not
+as an operational setting.

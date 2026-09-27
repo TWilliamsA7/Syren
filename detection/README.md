@@ -73,7 +73,7 @@ the single-state path, so it does not assess aircraft conflicts.
 That benchmark intentionally excludes the pairwise conflict scan. The conflict rule is exercised by the smoke suite; benchmark it separately at realistic snapshot sizes before scaling it up, since this first implementation checks aircraft pairs directly.
 
 The default rules cover rapid and accelerating descent, ground-speed decay,
-sustained speed above 300 kt below 10,000 ft, abrupt track changes, heading
+sustained speed above 330 kt below 10,000 ft, abrupt track changes, heading
 reversals, altitude oscillation, telemetry gaps, altitude/rate disagreement
 (barometric or geometric), and squawk codes 7500/7600/7700. Expected descent
 context suppresses ordinary speed-decay and accelerating-descent alerts during
@@ -83,6 +83,25 @@ independent.
 Fleet snapshots additionally screen projected aircraft conflicts using a short
 constant-velocity horizon. Thresholds and projections are initial heuristics
 and should be tuned against simulation and historical replay.
+
+## Threshold review
+
+On the 100-flight generated validation set (`validation_002`), the original
+defaults produced 510 alerts on normal-labeled observations out of 179,123
+(0.285%). Raising the near-ground speed threshold from 300 to 330 kt reduced
+that detector's normal-state alerts from 135 to 73 (46%) while retaining all 3
+of 3 low-altitude overspeed events; median first-alert latency increased from
+49 to 69 seconds. Raising the altitude oscillation minimum range from 900 to
+1,200 ft reduced its normal-state alerts from 337 to 278 (18%), while event
+detection changed from 7 of 7 to 6 of 7. Together, the updated thresholds
+reduced normal-state alerts to 389 (0.217%) and detected 18 of 19 supported
+events, compared with 19 of 19 at the original settings.
+
+These thresholds are a modest generated-data tuning, not real-flight
+calibration. The training set results at original defaults were 5,209 normal
+state alerts among 1,776,302 normal states (0.293%), with zero of 696
+anomaly-free control flights alerted. The validation event counts are small;
+review new seeds and historical controls before making operational claims.
 
 ## Boundaries
 

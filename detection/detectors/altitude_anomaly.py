@@ -7,7 +7,7 @@ from detection.temporal.trend_analysis import range_of
 
 
 class AltitudeAnomalyDetector(RuleDetector):
-    def __init__(self, window_seconds: float = 120.0, minimum_range_ft: float = 900.0, warning_reversals: int = 2) -> None:
+    def __init__(self, window_seconds: float = 120.0, minimum_range_ft: float = 1200.0, warning_reversals: int = 2) -> None:
         if window_seconds <= 0 or minimum_range_ft <= 0 or warning_reversals < 2:
             raise ValueError("window/range must be positive and warning_reversals at least 2")
         self.minimum_range_ft = minimum_range_ft

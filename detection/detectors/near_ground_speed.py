@@ -8,7 +8,7 @@ class NearGroundSpeedDetector(RuleDetector):
     def __init__(
         self,
         altitude_limit_ft: float = 10_000.0,
-        speed_threshold_kts: float = 300.0,
+        speed_threshold_kts: float = 330.0,
         persistence_s: float = 15.0,
     ) -> None:
         if altitude_limit_ft <= 0 or speed_threshold_kts <= 0 or persistence_s <= 0:
