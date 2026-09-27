@@ -149,21 +149,46 @@ const REGION_VIEWS = {
   },
 };
 
-// Inline SVG Atlas for the plane icon with black outline/stroke: the plane twice, green (x 0)
-// and red (x 128). The icons aren't masks, so getColor can't recolor them; getIcon picks one.
+// Inline SVG atlas: normal (green), detector anomaly (orange), emergency squawk (red).
+// The icons aren't masks, so getColor can't recolor them; getIcon picks one.
 const PLANE_PATH =
   "M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z";
-const AIRPLANE_ICON = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="256" height="128" viewBox="0 0 48 24" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path fill="%2336F6B4" d="${PLANE_PATH}"/><path fill="%23F43F5E" transform="translate(24 0)" d="${PLANE_PATH}"/></svg>`;
+const AIRPLANE_ICON = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="384" height="128" viewBox="0 0 72 24" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path fill="%2336F6B4" d="${PLANE_PATH}"/><path fill="%23FB923C" transform="translate(24 0)" d="${PLANE_PATH}"/><path fill="%23F43F5E" transform="translate(48 0)" d="${PLANE_PATH}"/></svg>`;
 const ICON_MAPPING = {
   marker: { x: 0, y: 0, width: 128, height: 128, mask: false },
-  alert: { x: 128, y: 0, width: 128, height: 128, mask: false },
+  detected: { x: 128, y: 0, width: 128, height: 128, mask: false },
+  squawk: { x: 256, y: 0, width: 128, height: 128, mask: false },
 };
 
-// Show any detector or model alert in red, including emergency transponder states.
-const isAlert = (d: Aircraft) =>
-  (!!d.emergency && d.emergency !== "none") ||
-  (!!d.anomaly && d.anomaly !== "none") ||
-  (d.detection?.anomalies?.length ?? 0) > 0;
+const EMERGENCY_SQUAWKS = new Set(["7500", "7600", "7700"]);
+type AlertKind = "squawk" | "detected" | null;
+
+const alertKind = (aircraft: Aircraft): AlertKind => {
+  const detectorAnomalies = aircraft.detection?.anomalies ?? [];
+  const declaredEmergency =
+    !!aircraft.emergency && aircraft.emergency !== "none";
+  const emergencySquawk = EMERGENCY_SQUAWKS.has(
+    aircraft.squawk?.trim() ?? "",
+  );
+  const detectorSquawk = detectorAnomalies.some(
+    (anomaly) => anomaly.type === "EMERGENCY_SQUAWK",
+  );
+  if (
+    declaredEmergency ||
+    emergencySquawk ||
+    detectorSquawk ||
+    aircraft.anomaly === "squawk"
+  ) {
+    return "squawk";
+  }
+  if (
+    detectorAnomalies.length > 0 ||
+    (!!aircraft.anomaly && aircraft.anomaly !== "none")
+  ) {
+    return "detected";
+  }
+  return null;
+};
 
 type Region = "US_ALL" | "US_WEST" | "US_MIDWEST" | "US_SOUTH" | "US_EAST";
 const REGION_LABELS: [Region, string][] = [
@@ -214,7 +239,6 @@ function App() {
   const [followed, setFollowed] = useState<Followed | null>(null);
 
   const [searchIcao] = useState<string>("");
-  const [viewMode, setViewMode] = useState<string>("live");
 
   // History / Replay state
   const [historyMode, setHistoryMode] = useState<boolean>(false);
@@ -239,7 +263,6 @@ function App() {
   const [geminiAnswer, setGeminiAnswer] = useState<GeminiAnswer | null>(null);
 
   const consecutiveFailuresRef = useRef<number>(0);
-  const activeAlertIdsRef = useRef<Set<string>>(new Set());
   const askingHexRef = useRef<string | null>(null); // the aircraft whose Gemini answer is being waited for
 
   // Helper function to safely parse either JSON array or NDJSON (JSON Lines)
@@ -449,7 +472,6 @@ function App() {
       setSearchedAircraft(null);
     }
 
-    setViewMode("search_result");
   };
 
   const returnToLive = () => {
@@ -460,6 +482,20 @@ function App() {
   // Zoom to an aircraft, pin its popup, and keep the map centred on it as new positions arrive
   const followAircraft = (plane: Aircraft, onlyThis: boolean) => {
     setFollowed({ hex: plane.hex, onlyThis, centre: true });
+    setSelectedAircraft(plane);
+    if (plane.lat != null && plane.lon != null) {
+      setViewState((v) => ({
+        ...v,
+        latitude: plane.lat!,
+        longitude: plane.lon!,
+        zoom: Math.max(v.zoom, FOLLOW_ZOOM),
+      }));
+    }
+  };
+
+  // Select an alert and centre once without entering follow mode.
+  const selectAircraft = (plane: Aircraft) => {
+    setFollowed(null);
     setSelectedAircraft(plane);
     if (plane.lat != null && plane.lon != null) {
       setViewState((v) => ({
@@ -518,35 +554,18 @@ function App() {
   };
 
   const emergencyAircraft = aircraftList.filter(
-    (a) => a.emergency && a.emergency !== "none",
+    (aircraft) => alertKind(aircraft) === "squawk",
   );
   const emergencyCount = emergencyAircraft.length;
-
-  // Focus the map once when a new alert enters the live/replay feed so it cannot
-  // remain outside the current viewport (for example, an alert near Vancouver).
-  useEffect(() => {
-    if (viewMode !== "live") return;
-
-    const alertingAircraft = aircraftList.filter(isAlert);
-    const activeIds = new Set(alertingAircraft.map((aircraft) => aircraft.hex));
-    const newAlert = alertingAircraft.find(
-      (aircraft) => !activeAlertIdsRef.current.has(aircraft.hex),
-    );
-    activeAlertIdsRef.current = activeIds;
-
-    if (
-      newAlert &&
-      Number.isFinite(newAlert.lat) &&
-      Number.isFinite(newAlert.lon)
-    ) {
-      setViewState((current) => ({
-        ...current,
-        latitude: newAlert.lat!,
-        longitude: newAlert.lon!,
-        zoom: Math.max(current.zoom, 6),
-      }));
-    }
-  }, [aircraftList, viewMode]);
+  const detectedAnomalies = aircraftList
+    .flatMap((aircraft) =>
+      (aircraft.detection?.anomalies ?? []).map((anomaly) => ({
+        aircraft,
+        anomaly,
+        riskScore: aircraft.detection?.risk_score ?? anomaly.severity,
+      })),
+    )
+    .sort((a, b) => b.riskScore - a.riskScore);
 
   // The pinned aircraft with its newest data; its last known data if it has left the feed
   const pinnedAircraft = selectedAircraft
@@ -656,7 +675,7 @@ function App() {
         : aircraftList,
       iconAtlas: AIRPLANE_ICON,
       iconMapping: ICON_MAPPING,
-      getIcon: (d: Aircraft) => (isAlert(d) ? "alert" : "marker"),
+      getIcon: (d: Aircraft) => alertKind(d) ?? "marker",
       getPosition: (d: Aircraft) => [d.lon ?? -95.7129, d.lat ?? 37.0902],
       getSize: 24,
       getAngle: (d: Aircraft) => -(d.track ?? 0),
@@ -1009,6 +1028,57 @@ function App() {
                     </button>
                   </li>
                 ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="panel-section anomaly-section">
+            <div className="section-head anomaly-heading">
+              <h2>Detected anomalies</h2>
+              <span className="anomaly-count mono">
+                {detectedAnomalies.length}
+              </span>
+            </div>
+            <div className="anomaly-legend" aria-label="Aircraft alert colors">
+              <span><i className="dot orange" /> Detector</span>
+              <span><i className="dot red" /> Emergency squawk</span>
+            </div>
+            {detectedAnomalies.length === 0 ? (
+              <p className="anomaly-empty">No active anomalies detected</p>
+            ) : (
+              <ul className="anomaly-list" aria-live="polite">
+                {detectedAnomalies.map(({ aircraft, anomaly, riskScore }) => {
+                  const isSquawk = anomaly.type === "EMERGENCY_SQUAWK";
+                  const callsign = aircraft.flight?.trim() || aircraft.hex;
+                  return (
+                    <li key={`${aircraft.hex}-${anomaly.type}`}>
+                      <button
+                        className={`anomaly-card ${isSquawk ? "squawk" : "detected"}`}
+                        onClick={() => selectAircraft(aircraft)}
+                        title="Select and centre this aircraft"
+                      >
+                        <span className="anomaly-card-heading">
+                          <strong>{callsign}</strong>
+                          <span className="anomaly-source">
+                            {isSquawk ? "SQUAWK" : "DETECTOR"}
+                          </span>
+                        </span>
+                        <span className="anomaly-card-meta">
+                          <span className="anomaly-type">
+                            {anomaly.type.toLowerCase().replaceAll("_", " ")}
+                          </span>
+                        </span>
+                        <span className="anomaly-message">
+                          {anomaly.message}
+                        </span>
+                        <span className="anomaly-card-footer mono">
+                          <span>{aircraft.hex}</span>
+                          <span>Risk {Math.round(riskScore * 100)}%</span>
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

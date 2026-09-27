@@ -7,6 +7,7 @@ from detection.engine import DetectionEngine, build_default_engine
 from shared.flight_state import make_flight_state, validate_flight_state
 
 STALE_AFTER_S = 20
+MAX_CONFLICT_FLEET_SIZE = 128
 
 ADSB_LOL_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
 ADSB_FI_URL = "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
@@ -79,8 +80,8 @@ def enrich_snapshot(states, engine, detection_cache, timestamp_cache):
 
     ADS-B services can repeat a slightly older position for a track, so those
     samples reuse its last result instead of moving the streaming engine back
-    in time. All accepted aircraft are evaluated together so fleet conflicts
-    are included too.
+    in time. Keep the pairwise conflict scan to bounded snapshots: it compares
+    every pair and is too expensive for the full nationwide live feed.
     """
     current = []
     for state in states:
@@ -89,7 +90,10 @@ def enrich_snapshot(states, engine, detection_cache, timestamp_cache):
             current.append(state)
 
     if current:
-        results = engine.update_fleet(current)
+        if len(current) <= MAX_CONFLICT_FLEET_SIZE:
+            results = engine.update_fleet(current)
+        else:
+            results = [engine.update(state) for state in current]
         for state, result in zip(current, results):
             icao24 = state["icao24"].strip().lower()
             detection_cache[icao24] = result.to_mapping()
@@ -119,16 +123,17 @@ if __name__ == "__main__":
             start_time = time.time()
             try:
                 states = fetch_live(ADSB_LOL_URL, 38.0, -96.0, 1450)
-                enriched_states = enrich_snapshot(states, engine, detection_cache, timestamp_cache)
+                valid_states = [state for state in states if not validate_flight_state(state)]
+                enriched_states = enrich_snapshot(
+                    valid_states, engine, detection_cache, timestamp_cache
+                )
                 
                 # Write atomically or directly to the target file path
                 with open(out_path, "w") as out:
                     for state in enriched_states:
-                        errors = validate_flight_state(state)
-                        if not errors:
-                            out.write(json.dumps(state) + "\n")
+                        out.write(json.dumps(state) + "\n")
                             
-                print(f"[{time.strftime('%H:%M:%S')}] Updated {out_path} with {len(states)} FlightStates")
+                print(f"[{time.strftime('%H:%M:%S')}] Updated {out_path} with {len(enriched_states)} FlightStates")
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S Fehler')}] Error fetching/writing live data: {e}", file=sys.stderr)
 

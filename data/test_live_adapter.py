@@ -45,6 +45,32 @@ def test_live_snapshot_ignores_out_of_order_positions():
     assert enriched[0]["detection"]["timestamp"] == newest[0]["timestamp"]
 
 
+def test_large_live_snapshot_avoids_pairwise_fleet_scan():
+    class Result:
+        def to_mapping(self):
+            return {
+                "icao24": "a00000", "flight_id": "test", "timestamp": 1,
+                "risk_score": 0.0, "severity": "normal", "anomalies": [],
+            }
+
+    class PerAircraftEngine:
+        updates = 0
+
+        def update(self, state):
+            self.updates += 1
+            return Result()
+
+        def update_fleet(self, states):
+            raise AssertionError("large live feeds must avoid all-pairs conflict screening")
+
+    template = parse_response({"ac": [AIRCRAFT], "now": 1790400021000})[0]
+    states = [{**template, "icao24": f"a{i:05x}"} for i in range(129)]
+    engine = PerAircraftEngine()
+    enriched = enrich_snapshot(states, engine, {}, {})
+    assert len(enriched) == 129
+    assert engine.updates == 129
+
+
 LIVE_URLS = {
     "adsb.lol": ADSB_LOL_URL,
     "adsb.fi": ADSB_FI_URL,

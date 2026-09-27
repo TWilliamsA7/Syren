@@ -9,6 +9,7 @@
   --accent-border: #60A5FA;
   --border: #334155;
   --green: #36F6B4;
+  --orange: #FB923C;
   --red: #F43F5E;
 
   --sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
@@ -118,6 +119,7 @@ html, body, #root {
 }
 
 .dot.green { background: var(--green); }
+.dot.orange { background: var(--orange); }
 .dot.red { background: var(--red); }
 .dot.accent { background: var(--accent); }
 
@@ -603,6 +605,155 @@ html, body, #root {
 .emergency-detail {
   color: var(--red);
   font-size: 12px;
+}
+
+.anomaly-section {
+  min-width: 0;
+}
+
+.anomaly-heading {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.anomaly-count {
+  min-width: 22px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-main);
+  font-size: 11px;
+  text-align: center;
+}
+
+.anomaly-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: -2px 0 10px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.anomaly-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.anomaly-empty {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.anomaly-list {
+  display: grid;
+  gap: 7px;
+  max-height: min(32vh, 280px);
+  margin: 0;
+  padding: 0 3px 0 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
+}
+
+.anomaly-card {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--orange);
+  border-radius: 5px;
+  background: var(--bg-card);
+  color: var(--text-main);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.anomaly-card.squawk {
+  border-left-color: var(--red);
+}
+
+.anomaly-card:hover,
+.anomaly-card:focus-visible {
+  background: var(--bg-sidebar);
+  outline: 1px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+.anomaly-card-heading,
+.anomaly-card-meta,
+.anomaly-card-footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.anomaly-card-heading strong,
+.anomaly-card-meta > span,
+.anomaly-card-footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.anomaly-card-heading strong {
+  font-size: 13px;
+}
+
+.anomaly-source {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(251, 146, 60, 0.14);
+  color: var(--orange);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+.anomaly-type {
+  color: var(--text-main);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.anomaly-card.squawk .anomaly-source {
+  background: rgba(244, 63, 94, 0.14);
+  color: var(--red);
+}
+
+.anomaly-message {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.anomaly-card-footer {
+  color: var(--text-muted);
+  font-size: 10px;
 }
 
 .kv {
