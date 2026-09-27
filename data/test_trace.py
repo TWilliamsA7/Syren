@@ -79,6 +79,7 @@ def test_export_day():
         progress = []
         counts = export_day("2026-09-24", out_path, start="16:00", hours=1, root=root,
                             on_progress=lambda done, total: progress.append((done, total)))
+        assert progress[-1] == (3, 3), "the last progress report is all 3 trace files"
         with open_jsonl(out_path) as f:
             states = [json.loads(line) for line in f]
 

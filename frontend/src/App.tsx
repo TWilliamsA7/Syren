@@ -235,9 +235,7 @@ function App() {
   const [selectedAircraft, setSelectedAircraft] = useState<Aircraft | null>(
     null,
   ); // pinned by a click
-  const [, setSearchedAircraft] = useState<Aircraft | null>(
-    null,
-  );
+  const [, setSearchedAircraft] = useState<Aircraft | null>(null);
   const [geminiAnswer, setGeminiAnswer] = useState<GeminiAnswer | null>(null);
 
   const consecutiveFailuresRef = useRef<number>(0);
@@ -486,6 +484,7 @@ function App() {
     );
     if (found) {
       setFindError("");
+      setFindQuery("");
       followAircraft(found, true);
     } else {
       setFindError(
