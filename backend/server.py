@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend.gemini import question_status, start_question
 from data.history import available_range, days_on_disk
-from data.replay import history_status, skip, start_history, stop_history
+from data.replay import history_snapshot, history_status, skip, start_history, stop_history
 
 PORT = 8000
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -87,6 +87,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._reply_bytes(body, 200, etag)
         elif self.path == "/api/history_status":
             self._reply(history_status())
+        elif self.path.split("?", 1)[0] == "/api/history_aircraft":
+            self._reply_bytes(history_snapshot())
         elif self.path == "/api/history_days":
             first, last = available_range()
             self._reply({"first": first, "last": last, **days_on_disk()})

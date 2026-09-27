@@ -368,7 +368,7 @@ function App() {
 
     const fetchData = async () => {
       try {
-        const endpoint = historyMode ? "/history.jsonl" : "/api/aircraft";
+        const endpoint = historyMode ? "/api/history_aircraft" : "/api/aircraft";
         const headers =
           !historyMode && liveEtag ? { "If-None-Match": liveEtag } : undefined;
         const response = await fetch(endpoint, { cache: "no-store", headers });

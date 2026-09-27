@@ -27,6 +27,7 @@ _generation = 0  # bumped by every start and stop, so an old background thread k
 _player = None
 _seek_revision = 0
 _seek_target = None
+_snapshot_payload = b"[]"
 _status = {"state": "idle", "date": None, "clock": None, "first": None, "last": None,
            "done_bytes": 0, "total_bytes": 0, "export_done": 0, "export_total": 0,
            "error": None, "seeking": False}
@@ -190,34 +191,35 @@ def write_snapshot(lines, out_path):
             time.sleep(0.05 * (2 ** attempt))
 
 
-def _publish_snapshot(generation, revision, target, temporary, out_path):
-    """Replace the visible snapshot, retrying transient Windows reader locks."""
+def _publish_snapshot(generation, revision, target, payload, temporary, out_path):
+    """Publish in memory immediately and retry the optional file replacement."""
+    global _seek_target, _snapshot_payload
     for attempt in range(5):
         with _lock:
             if generation != _generation or revision != _seek_revision:
                 try:
                     os.remove(temporary)
-                except FileNotFoundError:
+                except OSError:
                     pass
                 return False
+            _snapshot_payload = payload
+            _status["clock"] = target
+            _status["state"] = "playing"
+            _status["seeking"] = False
+            _seek_target = target
             try:
                 os.replace(temporary, out_path)
             except PermissionError:
                 pass
             else:
-                global _seek_target
-                _status["clock"] = target
-                _status["state"] = "playing"
-                _status["seeking"] = False
-                _seek_target = target
                 return True
         if attempt < 4:
             time.sleep(0.05 * (2 ** attempt))
     try:
         os.remove(temporary)
-    except FileNotFoundError:
+    except OSError:
         pass
-    return False
+    return True
 
 
 # Update the status, unless a newer start or stop has replaced this thread. Returns False then.
@@ -280,8 +282,9 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
             temporary = out_path + f".{generation}.{revision}.tmp"
             with open(temporary, "w") as out:
                 out.writelines(lines)
+            payload = ("[" + ",".join(line.rstrip("\r\n") for line in lines) + "]").encode("utf-8")
             published = _publish_snapshot(
-                generation, revision, target, temporary, out_path
+                generation, revision, target, payload, temporary, out_path
             )
             if published:
                 handled_revision = revision
@@ -298,11 +301,12 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
 # A day that isn't on disk is downloaded first (~10 min), replacing the swap day.
 def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
                   out_path=HISTORY_FILE, root=ARCHIVE_DIR):
-    global _generation, _player, _seek_revision, _seek_target
+    global _generation, _player, _seek_revision, _seek_target, _snapshot_payload
     with _lock:
         _generation += 1
         _seek_revision = 0
         _seek_target = None
+        _snapshot_payload = b"[]"
         _player = None
         _status.update(state="loading", date=date, clock=None, first=None, last=None,
                        done_bytes=0, total_bytes=0, export_done=0, export_total=1,
@@ -347,6 +351,12 @@ def skip(seconds):
 def history_status():
     with _lock:
         return dict(_status)
+
+
+def history_snapshot():
+    """Return the latest replay snapshot without reopening the shared JSONL file."""
+    with _lock:
+        return _snapshot_payload
 
 
 if __name__ == "__main__":
