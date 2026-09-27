@@ -113,6 +113,7 @@ interface Followed {
 }
 
 const FOLLOW_ZOOM = 8; // zoom in at least this far when starting to follow an aircraft
+const REPLAY_ENABLED = import.meta.env.VITE_ENABLE_REPLAY !== "false";
 
 // Gemini's answer for one aircraft, kept with its hex so a late reply can't land on another plane
 interface GeminiAnswer {
@@ -1012,15 +1013,17 @@ function App() {
             )}
           </section>
 
-          <section className="panel-section">
-            <div className="section-head">
-              <h2>Replay a day</h2>
-              {historyMode && (
-                <button className="link" onClick={returnToLive}>
-                  Back to live
-                </button>
-              )}
-            </div>
+          {REPLAY_ENABLED && (
+            <>
+              <section className="panel-section">
+                <div className="section-head">
+                  <h2>Replay a day</h2>
+                  {historyMode && (
+                    <button className="link" onClick={returnToLive}>
+                      Back to live
+                    </button>
+                  )}
+                </div>
 
             <form onSubmit={handleSearch}>
               <div className="field-row">
@@ -1074,10 +1077,10 @@ function App() {
                 </button>
               </div>
             )}
-          </section>
+              </section>
 
-          {preparingReplay && (
-            <section className="panel-section">
+              {preparingReplay && (
+                <section className="panel-section">
               <h2>Preparing {historyStatusInfo.date ?? searchDate}</h2>
 
               <div
@@ -1132,7 +1135,9 @@ function App() {
                   finishes.
                 </p>
               )}
-            </section>
+                </section>
+              )}
+            </>
           )}
 
           <section className="panel-section">

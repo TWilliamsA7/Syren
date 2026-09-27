@@ -1,0 +1,23 @@
+[Unit]
+Description=Syren live aircraft API and feed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=syren
+Group=syren
+WorkingDirectory=/opt/syren
+Environment=SYREN_HOST=127.0.0.1
+Environment=PORT=8000
+EnvironmentFile=-/etc/syren/syren.env
+ExecStart=/opt/syren/.venv/bin/python -m backend.server
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

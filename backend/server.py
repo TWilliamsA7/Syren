@@ -10,7 +10,8 @@ from backend.gemini import question_status, start_question
 from data.history import available_range, days_on_disk
 from data.replay import history_snapshot, history_status, skip, start_history, stop_history
 
-PORT = 8000
+HOST = os.environ.get("SYREN_HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "8000"))
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIVE_FILE = os.path.join(REPO, "frontend", "public", "data.jsonl")
 _LIVE_CACHE_LOCK = threading.Lock()
@@ -125,9 +126,9 @@ class Handler(BaseHTTPRequestHandler):
 # Start the live feed in its own process, then serve the history API until Ctrl-C.
 if __name__ == "__main__":
     live = subprocess.Popen([sys.executable, "-m", "data.live_adapter", LIVE_FILE], cwd=REPO)
-    print(f"history API on http://localhost:{PORT}")
+    print(f"history API on http://{HOST}:{PORT}")
     try:
-        ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+        ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
