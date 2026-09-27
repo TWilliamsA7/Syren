@@ -1,5 +1,7 @@
 import argparse
+from array import array
 import bisect
+import copy
 import datetime
 import json
 import os
@@ -10,6 +12,7 @@ import time
 from data.history import ARCHIVE_DIR, day_dir, swap_day
 from data.trace import export_day, open_jsonl
 from detection.engine import build_default_engine
+from ml.aircraft_warning import AircraftWarningEngine
 
 HISTORY_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "public", "history.jsonl")
@@ -22,8 +25,11 @@ _lock = threading.Lock()
 _export_lock = threading.Lock()  # one export at a time; starting the same hour twice reuses it
 _generation = 0  # bumped by every start and stop, so an old background thread knows to quit
 _player = None
+_seek_revision = 0
+_seek_target = None
 _status = {"state": "idle", "date": None, "clock": None, "first": None, "last": None,
-           "done_bytes": 0, "total_bytes": 0, "export_done": 0, "export_total": 0, "error": None}
+           "done_bytes": 0, "total_bytes": 0, "export_done": 0, "export_total": 0,
+           "error": None, "seeking": False}
 
 
 # (timestamp, icao24) of one FlightState JSON line.
@@ -40,58 +46,124 @@ class Player:
 
     # Load every state as its JSON line, sorted by time; the clock starts at the first one.
     def __init__(self, path):
-        rows = []
-        with open_jsonl(path) as f:
+        source_stat = os.stat(path)
+        is_compressed = path.endswith(".gz")
+        plain_path = (f"{path}.{source_stat.st_size:x}-{source_stat.st_mtime_ns:x}.plain"
+                      if is_compressed else path)
+        if is_compressed and not os.path.exists(plain_path):
+            temporary_path = plain_path + ".tmp"
+            try:
+                with open_jsonl(path) as source, open(temporary_path, "wb") as plain:
+                    for line in source:
+                        plain.write(line.encode("utf-8"))
+                os.replace(temporary_path, plain_path)
+            finally:
+                try:
+                    os.remove(temporary_path)
+                except FileNotFoundError:
+                    pass
+
+        self.times = array("d")
+        self.offsets = array("Q")
+        ordered = True
+        with open(plain_path, "rb") as f:
             for line in f:
-                timestamp, icao24 = _time_and_icao24(line)
-                rows.append((timestamp, icao24, line.rstrip("\n") + "\n"))
-        if not rows:
+                timestamp, _ = _time_and_icao24(line.decode("utf-8"))
+                self.times.append(timestamp)
+                self.offsets.append(f.tell() - len(line))
+                if len(self.times) > 1 and timestamp < self.times[-2]:
+                    ordered = False
+        if not self.times:
             raise ValueError(f"{path} has no states, try another time or a bigger area")
-        rows.sort(key=lambda row: row[0])
-        self.times = [row[0] for row in rows]
-        self.icao24s = [row[1] for row in rows]
-        self.lines = [row[2] for row in rows]
+        if not ordered:
+            order = sorted(range(len(self.times)), key=self.times.__getitem__)
+            self.times = array("d", (self.times[i] for i in order))
+            self.offsets = array("Q", (self.offsets[i] for i in order))
+        self._plain_path = plain_path
         self.first, self.last = self.times[0], self.times[-1]
         self.clock = self.first
-        # Replay feeds are raw FlightStates too. Advance the same engine in
+        # Replay feeds are raw FlightStates too. Advance both engines in
         # timestamp order as the replay clock moves, and reset/replay on rewind.
         self._detection_engine = build_default_engine()
+        self._warning_engine = AircraftWarningEngine()
         self._next_detection_index = 0
         self._detection_results = {}
-        self._detection_clock = self.first
+        self._prediction_results = {}
+        self._checkpoints = []
+        self._next_checkpoint = self.first + 60.0
+        self._save_checkpoint(self.first, 0)
 
-    def _advance_detection(self):
-        if self.clock < self._detection_clock:
-            self._detection_engine.reset()
-            self._next_detection_index = 0
-            self._detection_results.clear()
-        end = bisect.bisect_right(self.times, self.clock)
-        while self._next_detection_index < end:
-            index = self._next_detection_index
-            state = json.loads(self.lines[index])
-            result = self._detection_engine.update_mapping(state)
-            self._detection_results[self.icao24s[index]] = result
-            self._next_detection_index += 1
-        self._detection_clock = self.clock
+    def _save_checkpoint(self, clock, cursor):
+        self._checkpoints.append((clock, cursor, copy.deepcopy(self._detection_engine),
+                                  copy.deepcopy(self._warning_engine),
+                                  self._detection_results.copy(), self._prediction_results.copy()))
+
+    def _restore_checkpoint(self, target):
+        checkpoint = self._checkpoints[0]
+        for candidate in self._checkpoints:
+            if candidate[0] <= target and candidate[0] >= checkpoint[0]:
+                checkpoint = candidate
+        (self.clock, self._next_detection_index, self._detection_engine,
+         self._warning_engine, self._detection_results, self._prediction_results) = copy.deepcopy(checkpoint)
+        self._next_checkpoint = self.clock + 60.0
+
+    def _advance_engines(self, target, cancelled=lambda: False, force_checkpoint=False):
+        if force_checkpoint or target < self.clock:
+            self._restore_checkpoint(target)
+        end = bisect.bisect_right(self.times, target)
+        with open(self._plain_path, "rb") as feed:
+            while self._next_detection_index < end:
+                # Checking the shared control lock for every record made large seeks
+                # contend with status and skip requests. A batch keeps cancellation
+                # responsive without putting a lock acquisition in the hot loop.
+                if self._next_detection_index % 256 == 0 and cancelled():
+                    return False
+                index = self._next_detection_index
+                offset = self.offsets[index]
+                if feed.tell() != offset:
+                    feed.seek(offset)
+                state = json.loads(feed.readline())
+                result = self._detection_engine.update_mapping(state)
+                prediction = self._warning_engine.update(state).to_mapping()
+                icao24 = state["icao24"].strip().lower()
+                self._detection_results[icao24] = result
+                self._prediction_results[icao24] = prediction
+                self._next_detection_index += 1
+                if self.times[index] >= self._next_checkpoint:
+                    self._save_checkpoint(self.times[index], self._next_detection_index)
+                    self._next_checkpoint = self.times[index] + 60.0
+        self.clock = target
+        return True
 
     # Move the clock by seconds (negative goes back), staying inside the file.
     def skip(self, seconds):
         self.clock = min(max(self.clock + seconds, self.first), self.last)
 
     # JSON lines of the latest state of each aircraft heard in the GONE_AFTER_S before the clock.
-    def snapshot(self):
-        self._advance_detection()
-        begin = bisect.bisect_left(self.times, self.clock - GONE_AFTER_S)
-        end = bisect.bisect_right(self.times, self.clock)
+    def snapshot(self, target=None, cancelled=lambda: False, force_checkpoint=False):
+        target = self.clock if target is None else min(max(target, self.first), self.last)
+        if not self._advance_engines(target, cancelled, force_checkpoint):
+            return None
+        begin = bisect.bisect_left(self.times, target - GONE_AFTER_S)
+        end = bisect.bisect_right(self.times, target)
         latest = {}
-        for i in range(begin, end):
-            latest[self.icao24s[i]] = self.lines[i]
+        with open(self._plain_path, "rb") as feed:
+            for i in range(begin, end):
+                offset = self.offsets[i]
+                if feed.tell() != offset:
+                    feed.seek(offset)
+                line = feed.readline()
+                state = json.loads(line)
+                latest[state["icao24"]] = line
         enriched = []
         for icao24, line in latest.items():
             state = json.loads(line)
             detection = self._detection_results.get(icao24)
             if detection is not None:
                 state["detection"] = detection
+            prediction = self._prediction_results.get(icao24)
+            if prediction is not None:
+                state["prediction"] = prediction
             enriched.append(json.dumps(state, separators=(",", ":")) + "\n")
         return enriched
 
@@ -131,7 +203,7 @@ def _set(generation, **fields):
 # snapshot every interval_s until stopped, moving the clock speed * interval_s each time.
 # At the end of the file it keeps showing the last moment, so skip(-300) still works.
 def _run(generation, date, start, hours, speed, interval_s, out_path, root):
-    global _player
+    global _player, _seek_target
     try:
         if day_dir(date, root) is None:
             _set(generation, state="downloading")
@@ -153,20 +225,62 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
             if generation != _generation:
                 return
             _player = player
+            _seek_target = player.clock
             _status.update(state="playing", clock=player.clock, first=player.first, last=player.last)
 
         next_write = time.monotonic()
+        handled_revision = -1
         while True:
             with _lock:
                 if generation != _generation:
                     return
-                write_snapshot(player.snapshot(), out_path)
-                _status["clock"] = player.clock
-                player.skip(speed * interval_s)
+                revision = _seek_revision
+                seeking = revision != handled_revision
+                target = _seek_target if seeking else min(player.clock + speed * interval_s, player.last)
+                _status["state"] = "seeking" if seeking and handled_revision >= 0 else "playing"
+                _status["seeking"] = bool(seeking and handled_revision >= 0)
+
+            def cancelled():
+                with _lock:
+                    return generation != _generation or revision != _seek_revision
+
+            lines = player.snapshot(target, cancelled, force_checkpoint=seeking and handled_revision >= 0)
+            if lines is None:
+                continue
+            temporary = out_path + f".{generation}.{revision}.tmp"
+            with open(temporary, "w") as out:
+                out.writelines(lines)
+            with _lock:
+                if generation != _generation:
+                    try:
+                        os.remove(temporary)
+                    except FileNotFoundError:
+                        pass
+                    return
+                if revision == _seek_revision and os.path.exists(temporary):
+                    try:
+                        os.replace(temporary, out_path)
+                        _status["clock"] = target
+                        _status["state"] = "playing"
+                        _status["seeking"] = False
+                        handled_revision = revision
+                        _seek_target = target
+                    except PermissionError:
+                        try:
+                            os.remove(temporary)
+                        except FileNotFoundError:
+                            pass
+                elif os.path.exists(temporary):
+                    try:
+                        os.remove(temporary)
+                    except FileNotFoundError:
+                        pass
+            if cancelled():
+                continue
             next_write += interval_s
             time.sleep(max(0.0, next_write - time.monotonic()))
     except Exception as error:
-        _set(generation, state="failed", error=str(error))
+        _set(generation, state="failed", error=str(error), seeking=False)
 
 
 # Enter a date: show that day from start ("HH:MM" UTC) for hours in history.jsonl.
@@ -174,12 +288,15 @@ def _run(generation, date, start, hours, speed, interval_s, out_path, root):
 # A day that isn't on disk is downloaded first (~10 min), replacing the swap day.
 def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
                   out_path=HISTORY_FILE, root=ARCHIVE_DIR):
-    global _generation, _player
+    global _generation, _player, _seek_revision, _seek_target
     with _lock:
         _generation += 1
+        _seek_revision = 0
+        _seek_target = None
         _player = None
         _status.update(state="loading", date=date, clock=None, first=None, last=None,
-                       done_bytes=0, total_bytes=0, export_done=0, export_total=1, error=None)
+                       done_bytes=0, total_bytes=0, export_done=0, export_total=1,
+                       error=None, seeking=False)
         generation = _generation
         write_snapshot([], out_path)
     threading.Thread(target=_run, daemon=True,
@@ -189,25 +306,33 @@ def start_history(date, start="16:00", hours=1.0, speed=1.0, interval_s=1.0,
 # Exit date mode: stop writing history.jsonl (the file stays). A download that already
 # started can't be cancelled; it finishes in the background and the day stays on disk.
 def stop_history():
-    global _generation, _player
+    global _generation, _player, _seek_target, _seek_revision
     with _lock:
         _generation += 1
+        _seek_revision += 1
+        _seek_target = None
         _player = None
         _status.update(state="stopped", clock=None, first=None, last=None)
+        _status["seeking"] = False
 
 
 # Go forward (seconds > 0) or back (seconds < 0) in the day that's playing.
-# The frontend sees it on the next snapshot, within interval_s.
+# The request returns immediately; the replay worker publishes its newest target.
 def skip(seconds):
+    global _seek_revision, _seek_target
     with _lock:
         if _player is None:
             raise RuntimeError("no history day is playing")
-        _player.skip(seconds)
-        _status["clock"] = _player.clock
+        base = _seek_target if _seek_target is not None else _status["clock"]
+        _seek_target = min(max(base + seconds, _player.first), _player.last)
+        _seek_revision += 1
+        _status["clock"] = _seek_target
+        _status["state"] = "seeking"
+        _status["seeking"] = True
 
 
 # For the frontend to poll: {"state": "idle"|"loading"|"downloading"|"exporting"|"playing"|
-# "stopped"|"failed", "date", "clock" (Unix s of the moment shown), "first", "last",
+# "stopped"|"failed"|"seeking", "date", "clock" (Unix s of the moment shown), "first", "last",
 # "done_bytes", "total_bytes" (while downloading), "error"}
 def history_status():
     with _lock:

@@ -41,18 +41,17 @@ def test_player():
         with open_jsonl(path, "at") as f:  # a line with its keys in another order
             f.write(json.dumps({"icao24": "cccccc", **state("cccccc", 169)}) + "\n")
         player = Player(path)
-
-    assert (player.first, player.last, player.clock) == (100, 170, 100)
-    assert icao24s_at(player, 100) == ["aaaaaa"]
-    assert icao24s_at(player, 110) == ["aaaaaa", "bbbbbb"]
-    player.clock = 110
-    assert json.loads(player.snapshot()[0])["timestamp"] == 102, "latest state of each aircraft"
-    assert icao24s_at(player, 170) == ["bbbbbb", "cccccc"], "aaaaaa dropped after 60 s of silence"
-    assert icao24s_at(player, 110) == ["aaaaaa", "bbbbbb"], "going back works"
-    player.skip(-1000)
-    assert player.clock == 100, "can't go before the first state"
-    player.skip(1000)
-    assert player.clock == 170, "can't go past the last state"
+        assert (player.first, player.last, player.clock) == (100, 170, 100)
+        assert icao24s_at(player, 100) == ["aaaaaa"]
+        assert icao24s_at(player, 110) == ["aaaaaa", "bbbbbb"]
+        player.clock = 110
+        assert json.loads(player.snapshot()[0])["timestamp"] == 102, "latest state of each aircraft"
+        assert icao24s_at(player, 170) == ["bbbbbb", "cccccc"], "aaaaaa dropped after 60 s of silence"
+        assert icao24s_at(player, 110) == ["aaaaaa", "bbbbbb"], "going back works"
+        player.skip(-1000)
+        assert player.clock == 100, "can't go before the first state"
+        player.skip(1000)
+        assert player.clock == 170, "can't go past the last state"
 
 
 def test_player_runs_detection_and_recomputes_on_rewind():

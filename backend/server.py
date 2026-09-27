@@ -2,6 +2,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend.gemini import question_status, start_question
@@ -11,6 +13,34 @@ from data.replay import history_status, skip, start_history, stop_history
 PORT = 8000
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIVE_FILE = os.path.join(REPO, "frontend", "public", "data.jsonl")
+_LIVE_CACHE_LOCK = threading.Lock()
+_live_cache_fingerprint = object()
+_live_cache_body = b"[]"
+_live_cache_etag = '"empty"'
+
+
+def _live_feed_payload():
+    """Read and encode the live feed only when the adapter replaces it."""
+    global _live_cache_fingerprint, _live_cache_body, _live_cache_etag
+    try:
+        stat = os.stat(LIVE_FILE)
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        fingerprint = None
+
+    with _LIVE_CACHE_LOCK:
+        if fingerprint != _live_cache_fingerprint:
+            if fingerprint is None:
+                aircraft = []
+                _live_cache_etag = '"missing"'
+            else:
+                with open(LIVE_FILE, "r", encoding="utf-8") as feed:
+                    aircraft = [json.loads(line) for line in feed if line.strip()]
+                _live_cache_etag = f'"{fingerprint[0]:x}-{fingerprint[1]:x}"'
+            _live_cache_body = json.dumps(aircraft, separators=(",", ":")).encode()
+            _live_cache_fingerprint = fingerprint
+        age = max(0.0, time.time() - stat.st_mtime) if fingerprint else None
+        return _live_cache_body, _live_cache_etag, age
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -18,12 +48,22 @@ class Handler(BaseHTTPRequestHandler):
     # Send body back as JSON. If the browser already hung up there's no one to answer.
     def _reply(self, body, status=200):
         data = json.dumps(body).encode()
+        self._reply_bytes(data, status)
+
+    def _reply_bytes(self, data, status=200, etag=None):
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            if etag is not None:
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("ETag", etag)
+                age = getattr(self, "_live_feed_age", None)
+                self.send_header("X-Feed-Age-S", "unknown" if age is None else f"{age:.1f}")
+            if status != 304:
+                self.send_header("Content-Length", str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if data:
+                self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -39,12 +79,12 @@ class Handler(BaseHTTPRequestHandler):
             status = question_status(self.path.rsplit("/", 1)[1].split("?", 1)[0])
             self._reply(status if status else {"error": "unknown question"}, 200 if status else 404)
         elif self.path.split("?", 1)[0] == "/api/aircraft":
-            try:
-                with open(LIVE_FILE, "r", encoding="utf-8") as feed:
-                    aircraft = [json.loads(line) for line in feed if line.strip()]
-            except FileNotFoundError:
-                aircraft = []
-            self._reply(aircraft)
+            body, etag, age = _live_feed_payload()
+            self._live_feed_age = age
+            if self.headers.get("If-None-Match") == etag:
+                self._reply_bytes(b"", 304, etag)
+            else:
+                self._reply_bytes(body, 200, etag)
         elif self.path == "/api/history_status":
             self._reply(history_status())
         elif self.path == "/api/history_days":

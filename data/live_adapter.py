@@ -1,13 +1,17 @@
 import json
+import os
 import sys
 import urllib.request
 import time
 
 from detection.engine import DetectionEngine, build_default_engine
+from ml.aircraft_warning import AircraftWarningEngine
 from shared.flight_state import make_flight_state, validate_flight_state
 
 STALE_AFTER_S = 20
 MAX_CONFLICT_FLEET_SIZE = 128
+UPDATE_INTERVAL_S = 5.0
+LIVE_FETCH_TIMEOUT_S = 4.0
 
 ADSB_LOL_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius_nm}"
 ADSB_FI_URL = "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius_nm}"
@@ -75,14 +79,27 @@ def fetch_live(api_url, lat, lon, radius_nm, timeout_s=10):
     return parse_response(data)
 
 
-def enrich_snapshot(states, engine, detection_cache, timestamp_cache):
-    """Attach detector results to one live fleet snapshot.
+def enrich_snapshot(
+    states,
+    engine,
+    detection_cache,
+    timestamp_cache,
+    warning_engine=None,
+    prediction_cache=None,
+    prediction_timestamp_cache=None,
+):
+    """Attach detector and per-aircraft warning results to a live snapshot.
 
     ADS-B services can repeat a slightly older position for a track, so those
-    samples reuse its last result instead of moving the streaming engine back
-    in time. Keep the pairwise conflict scan to bounded snapshots: it compares
-    every pair and is too expensive for the full nationwide live feed.
+    samples reuse their last result instead of moving either streaming engine
+    back in time. Keep the pairwise conflict scan to bounded snapshots: it
+    compares every pair and is too expensive for the full nationwide live feed.
     """
+    warning_engine = warning_engine or AircraftWarningEngine()
+    prediction_cache = prediction_cache if prediction_cache is not None else {}
+    prediction_timestamp_cache = (
+        prediction_timestamp_cache if prediction_timestamp_cache is not None else {}
+    )
     current = []
     for state in states:
         icao24 = state["icao24"].strip().lower()
@@ -99,15 +116,34 @@ def enrich_snapshot(states, engine, detection_cache, timestamp_cache):
             detection_cache[icao24] = result.to_mapping()
             timestamp_cache[icao24] = state["timestamp"]
 
+    for state in states:
+        icao24 = state["icao24"].strip().lower()
+        if state["timestamp"] <= prediction_timestamp_cache.get(icao24, float("-inf")):
+            continue
+        prediction_cache[icao24] = warning_engine.update(state).to_mapping()
+        prediction_timestamp_cache[icao24] = state["timestamp"]
+
     return [
-        {**state, "detection": detection_cache.get(state["icao24"].strip().lower(), {
-            "icao24": state["icao24"].strip().lower(),
-            "flight_id": state.get("flight_id") or state["icao24"],
-            "timestamp": state["timestamp"],
-            "risk_score": 0.0,
-            "severity": "normal",
-            "anomalies": [],
-        })}
+        {
+            **state,
+            "detection": detection_cache.get(state["icao24"].strip().lower(), {
+                "icao24": state["icao24"].strip().lower(),
+                "flight_id": state.get("flight_id") or state["icao24"],
+                "timestamp": state["timestamp"],
+                "risk_score": 0.0,
+                "severity": "normal",
+                "anomalies": [],
+            }),
+            "prediction": prediction_cache.get(state["icao24"].strip().lower(), {
+                "icao24": state["icao24"].strip().lower(),
+                "flight_id": state.get("flight_id") or state["icao24"],
+                "timestamp": state["timestamp"],
+                "status": "collecting_history",
+                "evaluated": False,
+                "alert": False,
+                "signals": [],
+            }),
+        }
         for state in states
     ]
 
@@ -116,30 +152,65 @@ if __name__ == "__main__":
     print(f"Starting continuous live feed loop targeting: {out_path} (every 5s)...")
 
     engine: DetectionEngine = build_default_engine()
+    warning_engine = AircraftWarningEngine()
     detection_cache = {}
     timestamp_cache = {}
+    prediction_cache = {}
+    prediction_timestamp_cache = {}
     try:
         while True:
-            start_time = time.time()
+            cycle_start = time.perf_counter()
+            fetch_seconds = validation_seconds = scoring_seconds = write_seconds = 0.0
+            aircraft_count = 0
             try:
-                states = fetch_live(ADSB_LOL_URL, 38.0, -96.0, 1450)
-                valid_states = [state for state in states if not validate_flight_state(state)]
-                enriched_states = enrich_snapshot(
-                    valid_states, engine, detection_cache, timestamp_cache
+                stage_start = time.perf_counter()
+                states = fetch_live(
+                    ADSB_LOL_URL, 38.0, -96.0, 1450, timeout_s=LIVE_FETCH_TIMEOUT_S
                 )
-                
-                # Write atomically or directly to the target file path
-                with open(out_path, "w") as out:
+                fetch_seconds = time.perf_counter() - stage_start
+
+                stage_start = time.perf_counter()
+                valid_states = [state for state in states if not validate_flight_state(state)]
+                validation_seconds = time.perf_counter() - stage_start
+
+                stage_start = time.perf_counter()
+                enriched_states = enrich_snapshot(
+                    valid_states,
+                    engine,
+                    detection_cache,
+                    timestamp_cache,
+                    warning_engine,
+                    prediction_cache,
+                    prediction_timestamp_cache,
+                )
+                scoring_seconds = time.perf_counter() - stage_start
+                aircraft_count = len(enriched_states)
+
+                stage_start = time.perf_counter()
+                temporary_path = out_path + ".tmp"
+                with open(temporary_path, "w", encoding="utf-8", newline="\n") as out:
                     for state in enriched_states:
                         out.write(json.dumps(state) + "\n")
-                            
-                print(f"[{time.strftime('%H:%M:%S')}] Updated {out_path} with {len(enriched_states)} FlightStates")
+                for attempt in range(5):
+                    try:
+                        os.replace(temporary_path, out_path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05)
+                write_seconds = time.perf_counter() - stage_start
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S Fehler')}] Error fetching/writing live data: {e}", file=sys.stderr)
 
-            # Sleep for the remainder of the 5-second window
-            elapsed = time.time() - start_time
-            sleep_time = max(5.0, 5.0 - elapsed)
+            elapsed = time.perf_counter() - cycle_start
+            sleep_time = max(0.0, UPDATE_INTERVAL_S - elapsed)
+            print(
+                f"[{time.strftime('%H:%M:%S')}] Live cycle: {aircraft_count} aircraft; "
+                f"fetch={fetch_seconds:.3f}s validate={validation_seconds:.3f}s "
+                f"score={scoring_seconds:.3f}s write={write_seconds:.3f}s "
+                f"cycle={elapsed:.3f}s sleep={sleep_time:.3f}s"
+            )
             time.sleep(sleep_time)
 
     except KeyboardInterrupt:

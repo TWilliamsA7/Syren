@@ -43,8 +43,27 @@ interface Aircraft {
     severity: "normal" | "advisory" | "warning" | "critical";
     anomalies: { type: string; severity: number; message: string }[];
   };
+  prediction?: PredictionResult;
   state?: Record<string, unknown>; // the full FlightState from the feed, sent to Gemini
   anomaly?: string; // set by the AI model, see docs/protocol.md; "none" when nothing is wrong
+}
+
+interface PredictionSignal {
+  type: string;
+  value: number;
+  threshold: number;
+  window_seconds: number;
+  message: string;
+}
+
+interface PredictionResult {
+  icao24: string;
+  flight_id: string;
+  timestamp: number;
+  status: "collecting_history" | "clear" | "warning" | "suppressed";
+  evaluated: boolean;
+  alert: boolean;
+  signals: PredictionSignal[];
 }
 
 interface FlightStateFeed {
@@ -68,6 +87,7 @@ interface FlightStateFeed {
   } | null;
   status?: { squawk?: string | null; emergency?: string | null } | null;
   detection?: Aircraft["detection"];
+  prediction?: PredictionResult;
   anomaly?: string;
   timestamp?: number;
   [key: string]: unknown;
@@ -81,6 +101,7 @@ interface HistoryStatus {
   export_total: number;
   export_done: number;
   error: string | null;
+  seeking?: boolean;
 }
 
 // The aircraft the map is following: onlyThis hides every other plane,
@@ -149,27 +170,26 @@ const REGION_VIEWS = {
   },
 };
 
-// Inline SVG atlas: normal (green), detector anomaly (orange), emergency squawk (red).
+// Inline SVG atlas: normal (green), detector anomaly (orange), emergency squawk (red), prediction (yellow).
 // The icons aren't masks, so getColor can't recolor them; getIcon picks one.
 const PLANE_PATH =
   "M12 2a1.5 1.5 0 0 1 1.5 1.5v5.25l7 3.75v1.75l-7-2.25v5l2 1.5v1.25l-3.5-1-3.5 1v-1.25l2-1.5v-5l-7 2.25v-1.75l7-3.75V3.5A1.5 1.5 0 0 1 12 2z";
-const AIRPLANE_ICON = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="384" height="128" viewBox="0 0 72 24" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path fill="%2336F6B4" d="${PLANE_PATH}"/><path fill="%23FB923C" transform="translate(24 0)" d="${PLANE_PATH}"/><path fill="%23F43F5E" transform="translate(48 0)" d="${PLANE_PATH}"/></svg>`;
+const AIRPLANE_ICON = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" width="512" height="128" viewBox="0 0 96 24" stroke="black" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"><path fill="%2336F6B4" d="${PLANE_PATH}"/><path fill="%23FB923C" transform="translate(24 0)" d="${PLANE_PATH}"/><path fill="%23F43F5E" transform="translate(48 0)" d="${PLANE_PATH}"/><path fill="%23FACC15" transform="translate(72 0)" d="${PLANE_PATH}"/></svg>`;
 const ICON_MAPPING = {
   marker: { x: 0, y: 0, width: 128, height: 128, mask: false },
   detected: { x: 128, y: 0, width: 128, height: 128, mask: false },
   squawk: { x: 256, y: 0, width: 128, height: 128, mask: false },
+  prediction: { x: 384, y: 0, width: 128, height: 128, mask: false },
 };
 
 const EMERGENCY_SQUAWKS = new Set(["7500", "7600", "7700"]);
-type AlertKind = "squawk" | "detected" | null;
+type AlertKind = "squawk" | "detected" | "prediction" | null;
 
 const alertKind = (aircraft: Aircraft): AlertKind => {
   const detectorAnomalies = aircraft.detection?.anomalies ?? [];
   const declaredEmergency =
     !!aircraft.emergency && aircraft.emergency !== "none";
-  const emergencySquawk = EMERGENCY_SQUAWKS.has(
-    aircraft.squawk?.trim() ?? "",
-  );
+  const emergencySquawk = EMERGENCY_SQUAWKS.has(aircraft.squawk?.trim() ?? "");
   const detectorSquawk = detectorAnomalies.some(
     (anomaly) => anomaly.type === "EMERGENCY_SQUAWK",
   );
@@ -180,6 +200,9 @@ const alertKind = (aircraft: Aircraft): AlertKind => {
     aircraft.anomaly === "squawk"
   ) {
     return "squawk";
+  }
+  if (aircraft.prediction?.alert) {
+    return "prediction";
   }
   if (
     detectorAnomalies.length > 0 ||
@@ -214,6 +237,14 @@ const formatNumber = (
   unit: string,
 ) => (typeof value === "number" ? `${value.toLocaleString()} ${unit}` : "—");
 
+const formatBehaviorValue = (signal: PredictionSignal, value: number) =>
+  signal.type === "SPEED_LOSS"
+    ? `${(value * 60).toFixed(1)} kt/min`
+    : `${Math.round(value).toLocaleString()} ft`;
+
+const behaviorSignalLabel = (type: string) =>
+  type.toLowerCase().replaceAll("_", " ");
+
 // "16:00", "1600" or "9:05" -> "16:00" / "09:05"; null if it isn't a 24-hour time
 const parseTime24 = (text: string) => {
   const match = text.trim().match(/^(\d{1,2}):?(\d{2})$/);
@@ -224,6 +255,7 @@ const parseTime24 = (text: string) => {
 function App() {
   const [aircraftList, setAircraftList] = useState<Aircraft[]>([]);
   const [isLive, setIsLive] = useState<boolean>(true);
+  const [feedFresh, setFeedFresh] = useState<boolean>(true);
   const [lastUpdated, setLastUpdated] = useState<string>("—");
 
   const [currentRegion, setCurrentRegion] = useState<Region>("US_ALL");
@@ -317,12 +349,24 @@ function App() {
   // Poll the backend aircraft API, or the JSONL file while replaying history.
   useEffect(() => {
     let timer: NodeJS.Timeout;
+    let liveEtag: string | null = null;
     let cancelled = false; // set on cleanup, so a fetch still in flight can't keep an old loop going
 
     const fetchData = async () => {
       try {
         const endpoint = historyMode ? "/history.jsonl" : "/api/aircraft";
-        const response = await fetch(endpoint, { cache: "no-store" });
+        const headers =
+          !historyMode && liveEtag ? { "If-None-Match": liveEtag } : undefined;
+        const response = await fetch(endpoint, { cache: "no-store", headers });
+        if (cancelled) return;
+        if (!historyMode && response.status === 304) {
+          const age = Number(response.headers.get("X-Feed-Age-S"));
+          setFeedFresh(Number.isFinite(age) && age <= 15);
+          setIsLive(true);
+          consecutiveFailuresRef.current = 0;
+          timer = setTimeout(fetchData, 1000);
+          return;
+        }
         if (!response.ok) throw new Error("Failed to fetch data file");
 
         const rawApiResponse = historyMode
@@ -352,6 +396,7 @@ function App() {
             squawk: item.status?.squawk ?? undefined,
             emergency: item.status?.emergency ?? undefined,
             detection: item.detection,
+            prediction: item.prediction,
             anomaly: item.anomaly,
             category: item.aircraft?.category ?? undefined,
             timestamp: item.timestamp
@@ -361,6 +406,11 @@ function App() {
           };
         });
 
+        if (!historyMode) liveEtag = response.headers.get("ETag");
+        if (!historyMode) {
+          const age = Number(response.headers.get("X-Feed-Age-S"));
+          setFeedFresh(Number.isFinite(age) && age <= 15);
+        }
         setAircraftList(parsedData);
         setIsLive(true); // COOKED only when the fetch fails, not during every replay
         setLastUpdated(new Date().toISOString().slice(11, 19) + "Z");
@@ -471,7 +521,6 @@ function App() {
     } else {
       setSearchedAircraft(null);
     }
-
   };
 
   const returnToLive = () => {
@@ -566,6 +615,11 @@ function App() {
       })),
     )
     .sort((a, b) => b.riskScore - a.riskScore);
+  const behaviorWarnings = aircraftList.flatMap((aircraft) =>
+    aircraft.prediction?.alert
+      ? aircraft.prediction.signals.map((signal) => ({ aircraft, signal }))
+      : [],
+  );
 
   // The pinned aircraft with its newest data; its last known data if it has left the feed
   const pinnedAircraft = selectedAircraft
@@ -641,9 +695,13 @@ function App() {
   };
 
   const replayState: string = historyStatusInfo.state;
-  const canSkip = historyMode && replayState === "playing";
+  const canSkip =
+    historyMode && (replayState === "playing" || replayState === "seeking");
   const preparingReplay =
-    historyMode && replayState !== "playing" && replayState !== "stopped";
+    historyMode &&
+    ["loading", "downloading", "exporting", "loading_player"].includes(
+      replayState,
+    );
   const downloadPercent =
     historyStatusInfo.total_bytes > 0
       ? Math.round(
@@ -658,13 +716,27 @@ function App() {
         )
       : null; // the backend doesn't report export progress yet
 
-  const feedLabel = !isLive ? "Offline" : historyMode ? "Replay" : "Live";
-  const feedDot = !isLive ? "red" : historyMode ? "accent" : "green";
+  const feedLabel = !isLive
+    ? "Offline"
+    : historyMode
+      ? "Replay"
+      : feedFresh
+        ? "Live"
+        : "Stale";
+  const feedDot = !isLive
+    ? "red"
+    : historyMode
+      ? "accent"
+      : feedFresh
+        ? "green"
+        : "orange";
   const feedDetail = !historyMode
     ? "US airspace"
-    : replayState === "playing"
-      ? replayClockFormatted
-      : (REPLAY_STATE_TEXT[replayState] ?? replayState);
+    : replayState === "seeking"
+      ? "Seeking…"
+      : replayState === "playing"
+        ? replayClockFormatted
+        : (REPLAY_STATE_TEXT[replayState] ?? replayState);
 
   // Define Deck.GL Layers for Aircraft visualization mapped to geo coordinates
   const layers = [
@@ -772,25 +844,68 @@ function App() {
               </dl>
 
               {pinnedAircraft ? (
-                <div className="gemini">
-                  {pinnedAnswer?.status === "done" && (
-                    <p className="gemini-answer">{pinnedAnswer.text}</p>
-                  )}
-                  {pinnedAnswer?.status === "error" && (
-                    <p className="form-error">{pinnedAnswer.text}</p>
-                  )}
-                  <button
-                    className="btn"
-                    onClick={askGemini}
-                    disabled={pinnedAnswer?.status === "loading"}
-                  >
-                    {pinnedAnswer?.status === "loading"
-                      ? "Asking Gemini…"
-                      : pinnedAnswer?.status === "done"
-                        ? "Ask Gemini again"
-                        : "Ask Gemini about this aircraft"}
-                  </button>
-                </div>
+                <>
+                  <section className="behavior-prediction" aria-live="polite">
+                    {pinnedAircraft.prediction ? (
+                      <>
+                        <p
+                          className={`behavior-status ${pinnedAircraft.prediction.status}`}
+                        >
+                          {pinnedAircraft.prediction.status ===
+                          "collecting_history"
+                            ? "Collecting flight history"
+                            : pinnedAircraft.prediction.status === "warning"
+                              ? "New behavior warning"
+                              : pinnedAircraft.prediction.status ===
+                                  "suppressed"
+                                ? "Signal present; repeat alert suppressed"
+                                : pinnedAircraft.prediction.evaluated
+                                  ? "No behavior signal on latest evaluation"
+                                  : "Waiting for next evaluation"}
+                        </p>
+                        {pinnedAircraft.prediction.signals.map((signal) => (
+                          <div
+                            className="behavior-signal"
+                            key={`${signal.type}-${signal.window_seconds}`}
+                          >
+                            <strong>{behaviorSignalLabel(signal.type)}</strong>
+                            <p>{signal.message}</p>
+                            <span>
+                              Measured{" "}
+                              {formatBehaviorValue(signal, signal.value)}
+                              {" · "}
+                              Threshold{" "}
+                              {formatBehaviorValue(signal, signal.threshold)}
+                            </span>
+                          </div>
+                        ))}
+                      </>
+                    ) : (
+                      <p className="behavior-status">
+                        No prediction result is available for this feed.
+                      </p>
+                    )}
+                  </section>
+                  <div className="gemini">
+                    {pinnedAnswer?.status === "done" && (
+                      <p className="gemini-answer">{pinnedAnswer.text}</p>
+                    )}
+                    {pinnedAnswer?.status === "error" && (
+                      <p className="form-error">{pinnedAnswer.text}</p>
+                    )}
+                    <button
+                      className="btn"
+                      onClick={askGemini}
+                      disabled={pinnedAnswer?.status === "loading"}
+                    >
+                      {pinnedAnswer?.status === "loading"
+                        ? "Asking Gemini…"
+                        : pinnedAnswer?.status === "done"
+                          ? "Ask Gemini again"
+                          : "Ask Gemini about this aircraft"}
+                    </button>
+                  </div>
+                </>
               ) : (
                 <div className="tooltip-hint">
                   Click the aircraft to pin this
@@ -991,7 +1106,8 @@ function App() {
                 <p className="form-error">{historyStatusInfo.error}</p>
               ) : (
                 <p className="hint">
-                  The skip buttons unlock once the replay starts playing.
+                  The replay is being prepared. Skip buttons unlock when loading
+                  finishes.
                 </p>
               )}
             </section>
@@ -1040,8 +1156,12 @@ function App() {
               </span>
             </div>
             <div className="anomaly-legend" aria-label="Aircraft alert colors">
-              <span><i className="dot orange" /> Detector</span>
-              <span><i className="dot red" /> Emergency squawk</span>
+              <span>
+                <i className="dot orange" /> Detector
+              </span>
+              <span>
+                <i className="dot red" /> Emergency squawk
+              </span>
             </div>
             {detectedAnomalies.length === 0 ? (
               <p className="anomaly-empty">No active anomalies detected</p>
@@ -1083,14 +1203,66 @@ function App() {
             )}
           </section>
 
+          <section className="panel-section anomaly-section behavior-section">
+            <div className="section-head anomaly-heading">
+              <h2>Experimental behavior warnings</h2>
+              <span className="anomaly-count mono">
+                {behaviorWarnings.length}
+              </span>
+            </div>
+            <p className="behavior-disclaimer">
+              Named flight signals, not emergency probabilities.
+            </p>
+            {behaviorWarnings.length === 0 ? (
+              <p className="anomaly-empty">No active behavior warnings</p>
+            ) : (
+              <ul className="anomaly-list" aria-live="polite">
+                {behaviorWarnings.map(({ aircraft, signal }) => (
+                  <li key={`${aircraft.hex}-${signal.type}`}>
+                    <button
+                      className="anomaly-card behavior-card"
+                      onClick={() => selectAircraft(aircraft)}
+                      title="Select and centre this aircraft"
+                    >
+                      <span className="anomaly-card-heading">
+                        <strong>
+                          {aircraft.flight?.trim() || aircraft.hex}
+                        </strong>
+                        <span className="anomaly-source">BEHAVIOR</span>
+                      </span>
+                      <span className="anomaly-type">
+                        {behaviorSignalLabel(signal.type)}
+                      </span>
+                      <span className="anomaly-message">{signal.message}</span>
+                      <span className="anomaly-card-footer mono">
+                        <span>{aircraft.hex}</span>
+                        <span>{formatBehaviorValue(signal, signal.value)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
           <section className="panel-section">
             <h2>Feed</h2>
             <dl className="kv">
               <dt>Source</dt>
               <dd>{historyMode ? "adsb.lol archive" : "adsb.lol live"}</dd>
               <dt>Status</dt>
-              <dd className={isLive ? "ok" : "bad"}>
-                {isLive ? "OK" : "Offline"}
+              <dd
+                className={
+                  isLive ? (feedFresh || historyMode ? "ok" : "bad") : "bad"
+                }
+              >
+                {!isLive
+                  ? "Offline"
+                  : historyMode
+                    ? "Replay"
+                    : feedFresh
+                      ? "OK"
+                      : "Stale"}
               </dd>
               <dt>Last update</dt>
               <dd>{lastUpdated}</dd>
